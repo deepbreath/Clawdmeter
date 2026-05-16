@@ -26,8 +26,8 @@ SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
 
-POLL_INTERVAL = 60
-TICK = 5
+POLL_INTERVAL = 10
+TICK = 1
 SCAN_TIMEOUT = 8.0
 
 # macOS: token lives in Keychain (service "Claude Code-credentials").
@@ -57,6 +57,27 @@ OPENAI_API_BODY = {
 }
 CODEX_CONFIG_PATH = Path.home() / ".codex" / "config.json"
 CODEX_AUTH_PATH = Path.home() / ".codex" / "auth.json"
+EVENT_FILE = Path.home() / ".config" / "claude-usage-monitor" / "event.json"
+
+# Maps Claude Code hook event type strings to firmware sound_event_t values
+_EVENT_TYPE_MAP = {
+    "start":    1,  # EVT_START
+    "complete": 2,  # EVT_COMPLETE
+    "error":    3,  # EVT_ERROR
+    "input":    4,  # EVT_INPUT
+}
+
+
+def read_pending_event() -> int:
+    """Read and clear the event file. Returns EVT_* int (0 = none)."""
+    if not EVENT_FILE.exists():
+        return 0
+    try:
+        data = json.loads(EVENT_FILE.read_text())
+        EVENT_FILE.unlink(missing_ok=True)
+        return _EVENT_TYPE_MAP.get(data.get("type", ""), 0)
+    except (json.JSONDecodeError, OSError):
+        return 0
 
 
 def log(msg: str) -> None:
@@ -324,8 +345,8 @@ async def connect_and_run(address_or_device, stop_event: asyncio.Event) -> bool:
     log(f"Connecting to {label}...")
     client = BleakClient(address_or_device)
     try:
-        await client.connect()
-    except (BleakError, asyncio.TimeoutError) as e:
+        await client.connect(timeout=15.0)
+    except (BleakError, asyncio.TimeoutError, asyncio.CancelledError) as e:
         log(f"Connection failed: {e}")
         return False
 
@@ -334,17 +355,40 @@ async def connect_and_run(address_or_device, stop_event: asyncio.Event) -> bool:
         return False
 
     log("Connected")
-    await asyncio.sleep(1.5)  # wait for Windows GATT discovery to complete
+    await asyncio.sleep(3.0)  # wait for Windows GATT discovery to complete
+
+    # Verify our RX characteristic is present — Windows GATT cache can be stale
+    # after a firmware reflash. Bail out so the caller reconnects with a fresh scan.
+    rx_char = client.services.get_characteristic(RX_CHAR_UUID)
+    if rx_char is None:
+        log("RX characteristic not found (stale Windows GATT cache). "
+            "Remove the device from Windows Bluetooth settings and reconnect.")
+        try:
+            await client.disconnect()
+        except BleakError:
+            pass
+        return False
+
     session = Session(client)
     await session.setup_refresh_subscription()
 
     last_poll = 0.0
+    last_payload: dict | None = None
     used_successfully = False
     try:
         while client.is_connected and not stop_event.is_set():
             now = time.time()
             elapsed = now - last_poll
-            if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
+
+            # Fast path: pending event + cached payload → send immediately without API poll
+            evt = read_pending_event()
+            if evt and last_payload is not None:
+                payload = dict(last_payload)
+                payload["evt"] = evt
+                log(f"Event fast-send: evt={evt}")
+                if await session.write_payload(payload):
+                    used_successfully = True
+            elif session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL or evt:
                 session.refresh_requested.clear()
                 token = read_token()
                 if not token:
@@ -352,6 +396,10 @@ async def connect_and_run(address_or_device, stop_event: asyncio.Event) -> bool:
                 else:
                     payload = await poll_api(token)
                     if payload is not None:
+                        if evt:
+                            payload["evt"] = evt
+                            log(f"Event injected: evt={evt}")
+                        last_payload = payload
                         if await session.write_payload(payload):
                             last_poll = time.time()
                             used_successfully = True
@@ -363,7 +411,7 @@ async def connect_and_run(address_or_device, stop_event: asyncio.Event) -> bool:
     finally:
         try:
             await client.disconnect()
-        except BleakError:
+        except (BleakError, asyncio.CancelledError):
             pass
 
     log("Device disconnected" if not stop_event.is_set() else "Stopping")
@@ -390,11 +438,15 @@ async def main() -> None:
     backoff = 1
     while not stop_event.is_set():
         address = load_cached_address()
-        connect_target = address  # str or BLEDevice
-        if not address:
+        # On Windows, WinRT BLE locks a device after a failed direct connect,
+        # causing subsequent scans to miss it. Always scan on Windows to get
+        # a fresh BLEDevice object instead of connecting by raw MAC string.
+        if address and sys.platform != "win32":
+            connect_target = address
+        else:
             result = await scan_for_device()
             if result:
-                address, connect_target = result  # use BLEDevice object directly
+                address, connect_target = result  # BLEDevice object
                 save_address(address)
             else:
                 log(f"Device not found, retrying in {backoff}s...")

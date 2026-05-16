@@ -9,6 +9,7 @@
 #include "imu.h"
 #include "splash.h"
 #include "usage_rate.h"
+#include "sound.h"
 
 // Physical buttons (global, screen-independent):
 //   BTN_BACK   (GPIO 0)  — left,  send Space (Claude Code voice mode push-to-talk)
@@ -155,8 +156,8 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     }
 }
 
-// Parse a JSON line into UsageData (and optionally CodexData)
-static bool parse_json(const char* json, UsageData* out, CodexData* cx_out) {
+// Parse a JSON line into UsageData (and optionally CodexData and sound event)
+static bool parse_json(const char* json, UsageData* out, CodexData* cx_out, sound_event_t* evt_out = nullptr) {
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, json);
     if (err) {
@@ -180,6 +181,8 @@ static bool parse_json(const char* json, UsageData* out, CodexData* cx_out) {
         cx_out->ok           = doc["cx_ok"] | false;
         cx_out->valid        = cx_out->ok;
     }
+
+    if (evt_out) *evt_out = (sound_event_t)(doc["evt"] | 0);
 
     return true;
 }
@@ -226,6 +229,11 @@ static void check_serial_cmd() {
             cmd_buf[cmd_pos] = '\0';
             if (strcmp(cmd_buf, "screenshot") == 0) {
                 send_screenshot();
+            } else if (strncmp(cmd_buf, "sound", 5) == 0) {
+                int n = (cmd_pos > 5) ? atoi(cmd_buf + 6) : 2;
+                if (n < 1 || n > 4) n = 2;
+                Serial.printf("sound_play(%d)\n", n);
+                sound_play((sound_event_t)n);
             }
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
@@ -249,6 +257,9 @@ void setup() {
 
     // Init PMU
     power_init();
+
+    // Init audio codec
+    sound_init();
 
     // Init IMU (accelerometer for auto-rotation)
     imu_init();
@@ -401,7 +412,8 @@ void loop() {
 
     // Process incoming BLE data
     if (ble_has_data()) {
-        if (parse_json(ble_get_data(), &usage, &codex)) {
+        sound_event_t evt = EVT_NONE;
+        if (parse_json(ble_get_data(), &usage, &codex, &evt)) {
             int g_before = usage_rate_group();
             usage_rate_sample(usage.session_pct);
             int g_after = usage_rate_group();
@@ -412,6 +424,7 @@ void loop() {
             }
             ui_update(&usage);
             ui_update_codex(&codex);
+            if (evt != EVT_NONE) sound_play(evt);
             ble_send_ack();
         } else {
             ble_send_nack();

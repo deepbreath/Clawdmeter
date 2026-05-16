@@ -29,6 +29,17 @@
 // ---- PMU (AXP2101 via same I2C) ----
 #define AXP2101_ADDR 0x34
 
+// ---- Audio (ES8311 speaker codec + ES7210 mic ADC, shared I2S bus) ----
+#define I2S_MCLK_ES8311  42
+#define I2S_MCLK_ES7210  16
+#define I2S_BCK          9
+#define I2S_WS           45
+#define I2S_DO           8    // ESP32 → ES8311 (speaker output)
+#define I2S_DI           10   // ES7210 → ESP32 (mic input)
+#define PA_EN            46   // power amplifier enable (active HIGH)
+#define ES8311_ADDR      0x18
+#define ES7210_ADDR      0x40
+
 // ---- Global hardware objects (defined in main.cpp) ----
 extern Arduino_DataBus *bus;
 extern Arduino_CO5300 *gfx;

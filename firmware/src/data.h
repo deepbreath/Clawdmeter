@@ -1,5 +1,12 @@
 #pragma once
-#include <Arduino.h>
+
+typedef enum {
+    EVT_NONE = 0,
+    EVT_START,
+    EVT_COMPLETE,
+    EVT_ERROR,
+    EVT_INPUT,
+} sound_event_t;
 
 struct UsageData {
     float session_pct;       // 5-hour window utilization (0-100)
