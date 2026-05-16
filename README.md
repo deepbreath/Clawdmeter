@@ -71,6 +71,106 @@ launchctl unload ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist  # st
 launchctl load -w ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist # start
 ```
 
+## Windows installation
+
+### Flash the firmware
+
+Install [PlatformIO CLI](https://docs.platformio.org/en/latest/core/installation/index.html), then:
+
+```powershell
+pio run -d firmware -t upload --upload-port COM4
+```
+
+Replace `COM4` with your device's port (check Device Manager under "Espressif USB JTAG/serial debug unit").
+
+### Pair the device
+
+Open **Settings → Bluetooth & devices**, find "Claude Controller" and click *Connect*. Once paired, remove it from Windows Bluetooth settings — the daemon connects directly via bleak and Windows auto-reconnecting will block the daemon from scanning.
+
+### Install the daemon
+
+The daemon reads your Claude OAuth token from `~/.claude/.credentials.json`, polls usage every 10 s, and pushes it to the display over BLE.
+
+**Dependencies:**
+
+```powershell
+pip install bleak httpx
+```
+
+**Run manually:**
+
+```powershell
+$env:PYTHONUTF8=1; python daemon/claude_usage_daemon.py
+```
+
+**Build a standalone exe:**
+
+```powershell
+pip install pyinstaller
+pyinstaller --onefile `
+  --hidden-import=bleak.backends.winrt `
+  --hidden-import=bleak.backends.winrt.scanner `
+  --hidden-import=bleak.backends.winrt.client `
+  --name claude-usage-daemon `
+  daemon/claude_usage_daemon.py
+```
+
+Output: `dist\claude-usage-daemon.exe`. Re-run this command after any daemon update; the exe path stays the same.
+
+**Auto-start at login:**
+
+```powershell
+$startup = [Environment]::GetFolderPath("Startup")
+$wsh = New-Object -ComObject WScript.Shell
+$sc = $wsh.CreateShortcut("$startup\ClaudeUsageDaemon.lnk")
+$sc.TargetPath = "E:\workspace-github\Clawdmeter\dist\claude-usage-daemon.exe"
+$sc.WorkingDirectory = "E:\workspace-github\Clawdmeter"
+$sc.WindowStyle = 7
+$sc.Save()
+```
+
+Update the path to match wherever you cloned the repo.
+
+### Sound notifications
+
+The device plays audio notifications via the onboard ES8311 codec when Claude Code events fire. Wire up the hooks in `~/.claude/settings.json`:
+
+```json
+"hooks": {
+  "Stop": [{
+    "hooks": [{"type": "command", "command": "python -c \"import json,pathlib; p=pathlib.Path.home()/'.config'/'claude-usage-monitor'/'event.json'; p.parent.mkdir(parents=True,exist_ok=True); p.write_text(json.dumps({'type':'complete'}))\""}]
+  }],
+  "Notification": [{
+    "hooks": [{"type": "command", "command": "python -c \"import json,pathlib; p=pathlib.Path.home()/'.config'/'claude-usage-monitor'/'event.json'; p.parent.mkdir(parents=True,exist_ok=True); p.write_text(json.dumps({'type':'input'}))\""}]
+  }]
+}
+```
+
+| Event | Sound | Trigger |
+|-------|-------|---------|
+| `complete` | finish.wav | Claude finishes a response |
+| `input` | waiInput.wav | Claude is waiting for input |
+| `start` | start.wav | Claude starts working |
+| `error` | error.wav | Error occurred |
+
+To replace sounds, put WAV files in a folder and run the converter:
+
+```powershell
+python -c "
+import wave, audioop, struct
+SRC = 'path/to/your/wavs'
+# ... see tools/convert_sounds.py
+"
+```
+
+### Debug tools
+
+```powershell
+python serial_boot_log.py          # reset ESP32 and capture boot log
+python serial_cmd.py sound 2       # trigger a sound directly (1=start 2=finish 3=error 4=input)
+python serial_cmd.py screenshot    # capture framebuffer to PNG
+```
+
 ## Linux installation
 
 ### Flash the firmware
