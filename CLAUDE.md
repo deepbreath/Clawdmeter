@@ -1,8 +1,10 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # Project context
 
 ESP32-S3 firmware for a desk-side Claude Code usage monitor on a **Waveshare ESP32-S3-Touch-AMOLED-2.16** board (480×480 square AMOLED). Connects to a host daemon over BLE; daemon polls Anthropic API for usage data.
-
-This file is for future Claude Code sessions to bootstrap quickly. Read this first.
 
 ## Hardware (critical pins)
 
@@ -15,37 +17,42 @@ This file is for future Claude Code sessions to bootstrap quickly. Read this fir
 ## Architecture
 
 ```text
-main.cpp        — setup(), loop(), button polling (left→Space, right→Shift+Tab, mid→cycle), rotation flash
-display_cfg.h   — pin defines, extern object decls
-ui.{h,cpp}      — 3-screen UI (splash, usage, bluetooth); splash is touch-toggled, usage↔bluetooth via mid button
-splash.{h,cpp}  — 20×20 pixel-art animation engine, 24× upscale to 480×480
-imu.{h,cpp}     — accelerometer-driven rotation tracker (returns 0..3)
-power.{h,cpp}   — AXP2101 wrapper (battery %, charging, VBUS, PWR button)
-touch.{h,cpp}   — minimal tap detector → ui_toggle_splash() (Usage/Splash) or ble_clear_bonds() (BT reset zone)
-ble.{h,cpp}     — NimBLE peripheral: custom data service + HID keyboard
-data.h          — UsageData struct
-icons.h         — icon arrays. Battery (5×) are RGB565A8 with alpha; rest are raw RGB565.
-logo.h          — 80×80 RGB565 logo
-font_*.c        — pre-compiled LVGL 9 bitmap fonts (Tiempos 56, Styrene 48/28/24/20, Mono 32)
+main.cpp          — setup(), loop(), button polling (left→Space, right→Shift+Tab, mid→cycle), rotation flash
+display_cfg.h     — pin defines, extern object decls
+ui.{h,cpp}        — 3-screen UI (splash, usage, bluetooth); splash is touch-toggled, usage↔bluetooth via mid button
+splash.{h,cpp}    — 20×20 pixel-art animation engine, 24× upscale to 480×480
+imu.{h,cpp}       — accelerometer-driven rotation tracker (returns 0..3)
+power.{h,cpp}     — AXP2101 wrapper (battery %, charging, VBUS, PWR button)
+touch.{h,cpp}     — minimal tap detector → ui_toggle_splash() (Usage/Splash) or ble_clear_bonds() (BT reset zone)
+ble.{h,cpp}       — NimBLE peripheral: custom data service + HID keyboard
+usage_rate.{h,cpp}— tracks rate-of-change of session_pct over a rolling window; returns group 0..3 (idle→heavy)
+                    used by splash.cpp to select animation mood tier
+theme.h           — design tokens (single source of truth for all UI colors — Anthropic-inspired dark/AMOLED palette)
+data.h            — UsageData struct
+icons.h           — icon arrays. Battery (5×) are RGB565A8 with alpha; rest are raw RGB565.
+logo.h            — 80×80 RGB565 logo
+font_*.c          — pre-compiled LVGL 9 bitmap fonts (Tiempos 34/56px, Styrene 12/14/16/20/24/28/48px, Mono 18/32px)
 splash_animations.h — generated, do not hand-edit
 ```
 
 ## Build / flash
 
 ```bash
-pio run -d firmware                                       # build
-pio run -d firmware -t upload --upload-port /dev/ttyACM0  # flash (binary path uses USB JTAG)
+pio run -d firmware                   # build only
+./flash.sh                            # build + flash (Linux, auto-detects /dev/ttyACM0)
+./flash-mac.sh                        # build + flash (macOS, auto-detects /dev/cu.usbmodem*)
+./flash-mac.sh /dev/cu.usbmodem1101   # explicit port
 ```
 
-`/home/hermann/.platformio/penv/bin/pio` if `pio` isn't on PATH.
+Direct PlatformIO: `pio run -d firmware -t upload --upload-port /dev/ttyACM0`
 
-Device shows up as `/dev/ttyACM0` (Espressif USB JTAG/serial debug unit). No boot-mode gymnastics needed — direct flash works.
+Use `/home/hermann/.platformio/penv/bin/pio` if `pio` isn't on PATH. Device shows up as `/dev/ttyACM0` (Espressif USB JTAG); no boot-mode gymnastics needed.
 
 ## QA your own UI changes — don't ask the user
 
 The firmware ships a `screenshot` serial command that dumps the LVGL framebuffer over `/dev/ttyACM0`. `./screenshot.sh out.png /dev/ttyACM0` captures a 480×480 PNG. **Use this on every UI iteration** — Read the PNG with the Read tool, verify the change visually, iterate.
 
-The boot screen is `SCREEN_SPLASH` and only advances on a physical button press, so a fresh flash will sit on the splash. To screenshot the screen you're actually editing without asking the user to press a button, **temporarily change the default boot screen** in `main.cpp` (search for `ui_show_screen(SCREEN_SPLASH);`) to `SCREEN_USAGE` / `SCREEN_CONTROLLER` / `SCREEN_BLUETOOTH`, do your iteration, then revert before committing.
+The boot screen is `SCREEN_SPLASH` and only advances on a physical button press, so a fresh flash will sit on the splash. To screenshot the screen you're actually editing without asking the user to press a button, **temporarily change the default boot screen** in `main.cpp` (search for `ui_show_screen(SCREEN_SPLASH);`) to `SCREEN_USAGE` or `SCREEN_BLUETOOTH`, do your iteration, then revert before committing.
 
 ## Critical gotchas
 
@@ -72,29 +79,29 @@ node tools/scrape_claudepix.js  # → tools/claudepix_data/*.json
 node tools/convert_to_c.js      # → firmware/src/splash_animations.h
 ```
 
-Each animation has a per-animation 10-color RGB565 palette. Cell values 0..9 index it. Default boot screen.
+Each animation has a per-animation 10-color RGB565 palette. Cell values 0..9 index it. Default boot screen. Animations are grouped by `usage_rate_group()` (0=idle, 1=normal, 2=active, 3=heavy) so the splash mood tracks how hard Claude is working.
 
 ## User profile / preferences
 
 See `~/.claude/projects/.../memory/` files for persistent context (user is an embedded-beginner senior dev, brand-conscious, prefers iterative UI refinement, dislikes me authoring my own art when third-party assets are intended). Always read those memory files at session start.
 
-## Recent session highlights
-
-- Migrated from Panlee SC01 Plus (480×320 IPS) to Waveshare 2.16" AMOLED (480×480 square). Full hardware/library swap.
-- Added IMU auto-rotation, battery indicator, USB-state-aware screen switching.
-- Added splash screen with scraped pixel-art animations and 3-button physical input layout.
-- Fonts and icons re-scaled ~1.9× for the higher-DPI panel.
-- All UI margins widened to 20px to clear the rounded display corners.
-- Battery icons converted to RGB565A8 alpha so they blend cleanly over the splash animations.
-
 ## Daemon / host side
 
-Bash daemon (`daemon/claude-usage-daemon.sh`) reads OAuth token, polls Anthropic API, sends JSON over BLE GATT. Run with `systemctl --user start claude-usage-daemon`. The unit file's `ExecStart` is the absolute path to the script — repoint it when switching between the worktree and the main checkout.
+Two daemon variants — Linux (bash) and macOS (Python):
+
+| Platform | Script | Service |
+|---|---|---|
+| Linux | `daemon/claude-usage-daemon.sh` | systemd user service via `./install.sh` |
+| macOS | `daemon/claude_usage_daemon.py` | LaunchAgent via `./install-mac.sh` |
+
+Linux reads OAuth token from `~/.claude/.credentials.json`. macOS reads from the Keychain (`Claude Code-credentials`).
+
+Run Linux: `systemctl --user start claude-usage-daemon`. The unit file's `ExecStart` is the absolute path — repoint it when switching between worktrees.
 
 **Discovery & resilience:**
 
 - Connects by name (`"Claude Controller"`) on first run, caches resolved MAC at `~/.config/claude-usage-monitor/ble-address`. ESP32 BLE addresses are factory-burned per-chip, so swapping any board invalidates the cache.
-- On connect failure: cache is dropped AND device is removed from bluez (`bluetoothctl remove`) so the next scan won't re-pick a dead MAC. Multi-candidate scans pick `head -1` and let the failure cycle converge.
+- On connect failure: cache is dropped AND device is removed from bluez (`bluetoothctl remove`) so the next scan won't re-pick a dead MAC.
 - `POLL_INTERVAL=60`, `TICK=5`. Inner loop wakes every 5s to detect disconnects fast; polls Anthropic when 60s elapsed OR when ESP fires a refresh request.
 
 **GATT characteristics on service `4c41555a-...0001`:**
