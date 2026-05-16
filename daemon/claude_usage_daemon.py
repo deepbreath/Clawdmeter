@@ -56,6 +56,7 @@ OPENAI_API_BODY = {
     "messages": [{"role": "user", "content": "hi"}],
 }
 CODEX_CONFIG_PATH = Path.home() / ".codex" / "config.json"
+CODEX_AUTH_PATH = Path.home() / ".codex" / "auth.json"
 
 
 def log(msg: str) -> None:
@@ -147,6 +148,15 @@ def read_codex_key() -> str | None:
                 return key
         except (json.JSONDecodeError, OSError):
             pass
+    # Codex CLI uses OAuth (ChatGPT login) — read access_token from auth.json
+    if CODEX_AUTH_PATH.exists():
+        try:
+            data = json.loads(CODEX_AUTH_PATH.read_text())
+            token = data.get("tokens", {}).get("access_token")
+            if isinstance(token, str) and token:
+                return token
+        except (json.JSONDecodeError, OSError):
+            pass
     return None
 
 
@@ -170,14 +180,22 @@ async def poll_codex_api(key: str) -> dict | None:
     def hdr(name: str, default: str = "0") -> str:
         return resp.headers.get(name, default)
 
-    limit_tok = int(hdr("x-ratelimit-limit-tokens", "1") or "1")
+    if resp.status_code not in (200, 429):
+        log(f"Codex API unexpected status {resp.status_code}, skipping")
+        return {"cx_ok": False}
+
+    limit_tok = int(hdr("x-ratelimit-limit-tokens", "0") or "0")
     remaining_tok = int(hdr("x-ratelimit-remaining-tokens", "0") or "0")
-    limit_req = int(hdr("x-ratelimit-limit-requests", "1") or "1")
+    limit_req = int(hdr("x-ratelimit-limit-requests", "0") or "0")
     remaining_req = int(hdr("x-ratelimit-remaining-requests", "0") or "0")
     reset_tok = hdr("x-ratelimit-reset-tokens", "0s")
+    if limit_tok == 0 and limit_req == 0:
+        log("Codex rate-limit headers absent (no quota info), skipping")
+        return {"cx_ok": False}
 
-    token_pct = round((limit_tok - remaining_tok) * 100 / max(limit_tok, 1))
-    req_pct = round((limit_req - remaining_req) * 100 / max(limit_req, 1))
+    # Send remaining % (not used %) — display shows how much is left
+    token_pct = round(remaining_tok * 100 / max(limit_tok, 1))
+    req_pct = round(remaining_req * 100 / max(limit_req, 1))
     reset_s = _parse_reset_seconds(reset_tok)
 
     return {"cx_ts": token_pct, "cx_tr": reset_s, "cx_rs": req_pct, "cx_ok": True}
@@ -203,13 +221,15 @@ def save_address(addr: str) -> None:
     SAVED_ADDR_FILE.write_text(addr)
 
 
-async def scan_for_device() -> str | None:
+async def scan_for_device():
+    """Returns (address_str, BLEDevice) or None. Caller should pass BLEDevice to
+    BleakClient directly — on Windows the address string alone loses context after scan."""
     log(f"Scanning for '{DEVICE_NAME}' ({SCAN_TIMEOUT}s)...")
     devices = await BleakScanner.discover(timeout=SCAN_TIMEOUT)
     for d in devices:
         if d.name == DEVICE_NAME:
             log(f"Found: {d.address}")
-            return d.address
+            return d.address, d
     return None
 
 
@@ -271,6 +291,12 @@ class Session:
         self.refresh_requested.set()
 
     async def setup_refresh_subscription(self) -> None:
+        # Windows WinRT BLE initiates a security handshake when subscribing to
+        # notifications, which ESP32 rejects (no bonding), causing an immediate
+        # disconnect. Skip on Windows; 60s polling still delivers data.
+        if sys.platform == "win32":
+            log("Refresh subscription skipped on Windows (poll-only mode)")
+            return
         try:
             await self.client.start_notify(REQ_CHAR_UUID, self._on_refresh)
         except (BleakError, ValueError) as e:
@@ -287,15 +313,16 @@ class Session:
             return False
 
 
-async def connect_and_run(address: str, stop_event: asyncio.Event) -> bool:
-    """Connect to a known address and poll until disconnected or stopped.
+async def connect_and_run(address_or_device, stop_event: asyncio.Event) -> bool:
+    """Connect to a device (str address or BLEDevice) and poll until disconnected or stopped.
 
     Returns True if the connection was used successfully (so the caller
     keeps the cached address), False if the connection failed and the
     cache should be invalidated.
     """
-    log(f"Connecting to {address}...")
-    client = BleakClient(address)
+    label = address_or_device if isinstance(address_or_device, str) else address_or_device.address
+    log(f"Connecting to {label}...")
+    client = BleakClient(address_or_device)
     try:
         await client.connect()
     except (BleakError, asyncio.TimeoutError) as e:
@@ -307,6 +334,7 @@ async def connect_and_run(address: str, stop_event: asyncio.Event) -> bool:
         return False
 
     log("Connected")
+    await asyncio.sleep(1.5)  # wait for Windows GATT discovery to complete
     session = Session(client)
     await session.setup_refresh_subscription()
 
@@ -362,9 +390,11 @@ async def main() -> None:
     backoff = 1
     while not stop_event.is_set():
         address = load_cached_address()
+        connect_target = address  # str or BLEDevice
         if not address:
-            address = await scan_for_device()
-            if address:
+            result = await scan_for_device()
+            if result:
+                address, connect_target = result  # use BLEDevice object directly
                 save_address(address)
             else:
                 log(f"Device not found, retrying in {backoff}s...")
@@ -375,7 +405,7 @@ async def main() -> None:
                 backoff = min(backoff * 2, 60)
                 continue
 
-        ok = await connect_and_run(address, stop_event)
+        ok = await connect_and_run(connect_target, stop_event)
         if not ok:
             log("Invalidating cached address")
             SAVED_ADDR_FILE.unlink(missing_ok=True)

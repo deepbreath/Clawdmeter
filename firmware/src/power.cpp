@@ -14,6 +14,31 @@ static uint32_t last_charging_ms = 0;
 static uint32_t last_pwr_ms      = 0;
 #define PWR_POLL_MS 50
 
+// LiPo OCV → SOC lookup table (resting voltage, room temp, low current).
+// Linear interpolation between points.
+static int voltage_to_pct(uint16_t mv) {
+    if (mv == 0) return -1;
+    static const struct { uint16_t mv; int8_t pct; } tbl[] = {
+        {4200,100},{4150,95},{4110,90},{4080,85},
+        {4020,80}, {3980,75},{3950,70},{3910,65},
+        {3870,60}, {3830,55},{3790,50},{3750,45},
+        {3710,40}, {3670,35},{3630,30},{3590,25},
+        {3550,20}, {3510,15},{3450,10},{3270,5},
+        {3000,0}
+    };
+    const int n = (int)(sizeof(tbl) / sizeof(tbl[0]));
+    if (mv >= tbl[0].mv)   return 100;
+    if (mv <= tbl[n-1].mv) return 0;
+    for (int i = 0; i < n - 1; i++) {
+        if (mv >= tbl[i+1].mv) {
+            int dv = tbl[i].mv  - tbl[i+1].mv;
+            int dp = tbl[i].pct - tbl[i+1].pct;
+            return tbl[i+1].pct + (int)(mv - tbl[i+1].mv) * dp / dv;
+        }
+    }
+    return 0;
+}
+
 void power_init(void) {
     if (!pmu.begin(Wire, AXP2101_ADDR, IIC_SDA, IIC_SCL)) {
         Serial.println("AXP2101 init failed");
@@ -23,6 +48,7 @@ void power_init(void) {
 
     pmu.enableBattDetection();
     pmu.enableBattVoltageMeasure();
+    delay(200);  // AXP2101 needs time after enabling battery detection
 
     // Enable PWR button short-press IRQ (mid button for cycling screens)
     pmu.disableIRQ(XPOWERS_AXP2101_ALL_IRQ);
@@ -30,7 +56,7 @@ void power_init(void) {
     pmu.enableIRQ(XPOWERS_AXP2101_PKEY_SHORT_IRQ);
 
     cached_charging = pmu.isCharging();
-    cached_pct = pmu.getBatteryPercent();
+    cached_pct = voltage_to_pct(pmu.getBattVoltage());
 }
 
 void power_tick(void) {
@@ -43,7 +69,7 @@ void power_tick(void) {
 
     if (now - last_battery_ms >= BATTERY_POLL_MS) {
         last_battery_ms = now;
-        cached_pct = pmu.getBatteryPercent();
+        cached_pct = voltage_to_pct(pmu.getBattVoltage());
     }
 
     // Poll PWR button (AXP2101 short-press IRQ)
