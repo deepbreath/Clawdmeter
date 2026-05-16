@@ -9,6 +9,8 @@ DEVICE_MAC="${DEVICE_MAC:-}"  # auto-discovered if empty
 SERVICE_UUID="4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID="4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID="4c41555a-4465-7669-6365-000000000004"
+CODEX_CONFIG="$HOME/.codex/config.json"
+CODEX_API_KEY="${OPENAI_API_KEY:-}"
 POLL_INTERVAL=60
 TICK=5
 SAVED_MAC_FILE="$HOME/.config/claude-usage-monitor/ble-address"
@@ -22,6 +24,58 @@ log() {
 
 read_token() {
     grep -o '"accessToken":"[^"]*"' "$HOME/.claude/.credentials.json" | cut -d'"' -f4
+}
+
+read_codex_key() {
+    if [ -n "$CODEX_API_KEY" ]; then return 0; fi
+    if [ -f "$CODEX_CONFIG" ]; then
+        local key
+        key=$(grep -o '"apiKey":"[^"]*"' "$CODEX_CONFIG" | cut -d'"' -f4)
+        if [ -n "$key" ]; then CODEX_API_KEY="$key"; return 0; fi
+    fi
+    return 1
+}
+
+# Parse OpenAI reset time string ("1m30.5s", "30s") to integer seconds
+parse_reset_seconds() {
+    echo "$1" | awk '{
+        mins = 0; secs = 0
+        if (match($0, /[0-9]+m/)) mins = substr($0, RSTART, RLENGTH - 1) + 0
+        if (match($0, /[0-9]+(\.[0-9]+)?s/)) secs = substr($0, RSTART, RLENGTH - 1) + 0
+        printf "%.0f", mins * 60 + secs
+    }'
+}
+
+poll_codex() {
+    read_codex_key || return 1
+
+    local cx_headers
+    cx_headers=$(curl -s -D - -o /dev/null \
+        "https://api.openai.com/v1/chat/completions" \
+        -H "Authorization: Bearer $CODEX_API_KEY" \
+        -H "Content-Type: application/json" \
+        -d '{"model":"gpt-4o-mini","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}' \
+        2>/dev/null) || return 1
+
+    local limit_tok remaining_tok reset_tok limit_req remaining_req
+    limit_tok=$(echo "$cx_headers"     | grep -i "^x-ratelimit-limit-tokens:"     | tr -d '\r' | awk '{print $2}')
+    remaining_tok=$(echo "$cx_headers" | grep -i "^x-ratelimit-remaining-tokens:" | tr -d '\r' | awk '{print $2}')
+    reset_tok=$(echo "$cx_headers"     | grep -i "^x-ratelimit-reset-tokens:"     | tr -d '\r' | awk '{print $2}')
+    limit_req=$(echo "$cx_headers"     | grep -i "^x-ratelimit-limit-requests:"   | tr -d '\r' | awk '{print $2}')
+    remaining_req=$(echo "$cx_headers" | grep -i "^x-ratelimit-remaining-requests:" | tr -d '\r' | awk '{print $2}')
+
+    limit_tok=${limit_tok:-1}; remaining_tok=${remaining_tok:-0}
+    limit_req=${limit_req:-1}; remaining_req=${remaining_req:-0}
+    local reset_s
+    reset_s=$(parse_reset_seconds "${reset_tok:-0}")
+
+    awk -v lt="$limit_tok" -v rt="$remaining_tok" \
+        -v lr="$limit_req"  -v rr="$remaining_req" -v rs="$reset_s" \
+        'BEGIN {
+            ts   = (lt > 0) ? sprintf("%.0f", (lt - rt) * 100 / lt) : 0
+            reqs = (lr > 0) ? sprintf("%.0f", (lr - rr) * 100 / lr) : 0
+            printf "\"cx_ts\":%s,\"cx_tr\":%s,\"cx_rs\":%s,\"cx_ok\":true", ts, rs, reqs
+        }'
 }
 
 # Convert MAC to D-Bus path: AA:BB:CC:DD:EE:FF -> dev_AA_BB_CC_DD_EE_FF
@@ -221,16 +275,20 @@ poll() {
     s7d_reset=${s7d_reset:-0}
     status=${status:-unknown}
 
-    local payload
-    payload=$(awk -v u5="$s5h_util" -v r5="$s5h_reset" -v u7="$s7d_util" -v r7="$s7d_reset" -v st="$status" -v now="$now" \
+    local claude_fields
+    claude_fields=$(awk -v u5="$s5h_util" -v r5="$s5h_reset" -v u7="$s7d_util" -v r7="$s7d_reset" -v st="$status" -v now="$now" \
         'BEGIN {
             sp = sprintf("%.0f", u5 * 100);
             sr = (r5 - now) / 60; sr = sr > 0 ? sprintf("%.0f", sr) : 0;
             wp = sprintf("%.0f", u7 * 100);
             wr = (r7 - now) / 60; wr = wr > 0 ? sprintf("%.0f", wr) : 0;
-            printf "{\"s\":%s,\"sr\":%s,\"w\":%s,\"wr\":%s,\"st\":\"%s\",\"ok\":true}", sp, sr, wp, wr, st;
+            printf "\"s\":%s,\"sr\":%s,\"w\":%s,\"wr\":%s,\"st\":\"%s\",\"ok\":true", sp, sr, wp, wr, st;
         }')
 
+    local codex_fields
+    codex_fields=$(poll_codex 2>/dev/null) || codex_fields='"cx_ok":false'
+
+    local payload="{${claude_fields},${codex_fields}}"
     log "Sending: $payload"
     write_gatt "$RX_CHAR_PATH" "$payload" || { log "Write failed"; return 1; }
     return 0

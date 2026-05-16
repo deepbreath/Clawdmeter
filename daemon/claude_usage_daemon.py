@@ -49,6 +49,14 @@ API_BODY = {
     "messages": [{"role": "user", "content": "hi"}],
 }
 
+OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
+OPENAI_API_BODY = {
+    "model": "gpt-4o-mini",
+    "max_tokens": 1,
+    "messages": [{"role": "user", "content": "hi"}],
+}
+CODEX_CONFIG_PATH = Path.home() / ".codex" / "config.json"
+
 
 def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -127,6 +135,54 @@ def read_token() -> str | None:
     return _read_token_file()
 
 
+def read_codex_key() -> str | None:
+    env_key = os.environ.get("OPENAI_API_KEY")
+    if env_key:
+        return env_key
+    if CODEX_CONFIG_PATH.exists():
+        try:
+            data = json.loads(CODEX_CONFIG_PATH.read_text())
+            key = data.get("apiKey")
+            if isinstance(key, str) and key:
+                return key
+        except (json.JSONDecodeError, OSError):
+            pass
+    return None
+
+
+def _parse_reset_seconds(value: str) -> int:
+    """Parse OpenAI reset time string like '1m30.5s' or '30s' to integer seconds."""
+    mins = re.search(r"(\d+)m", value)
+    secs = re.search(r"(\d+(?:\.\d+)?)s", value)
+    total = (int(mins.group(1)) * 60 if mins else 0) + (float(secs.group(1)) if secs else 0)
+    return max(0, int(round(total)))
+
+
+async def poll_codex_api(key: str) -> dict | None:
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            resp = await http.post(OPENAI_API_URL, headers=headers, json=OPENAI_API_BODY)
+    except httpx.HTTPError as e:
+        log(f"Codex API call failed: {e}")
+        return None
+
+    def hdr(name: str, default: str = "0") -> str:
+        return resp.headers.get(name, default)
+
+    limit_tok = int(hdr("x-ratelimit-limit-tokens", "1") or "1")
+    remaining_tok = int(hdr("x-ratelimit-remaining-tokens", "0") or "0")
+    limit_req = int(hdr("x-ratelimit-limit-requests", "1") or "1")
+    remaining_req = int(hdr("x-ratelimit-remaining-requests", "0") or "0")
+    reset_tok = hdr("x-ratelimit-reset-tokens", "0s")
+
+    token_pct = round((limit_tok - remaining_tok) * 100 / max(limit_tok, 1))
+    req_pct = round((limit_req - remaining_req) * 100 / max(limit_req, 1))
+    reset_s = _parse_reset_seconds(reset_tok)
+
+    return {"cx_ts": token_pct, "cx_tr": reset_s, "cx_rs": req_pct, "cx_ok": True}
+
+
 def load_cached_address() -> str | None:
     if not SAVED_ADDR_FILE.exists():
         return None
@@ -186,7 +242,7 @@ async def poll_api(token: str) -> dict | None:
         except ValueError:
             return 0
 
-    payload = {
+    payload: dict = {
         "s": pct(hdr("anthropic-ratelimit-unified-5h-utilization")),
         "sr": reset_minutes(hdr("anthropic-ratelimit-unified-5h-reset")),
         "w": pct(hdr("anthropic-ratelimit-unified-7d-utilization")),
@@ -194,6 +250,14 @@ async def poll_api(token: str) -> dict | None:
         "st": hdr("anthropic-ratelimit-unified-5h-status", "unknown"),
         "ok": True,
     }
+
+    codex_key = read_codex_key()
+    if codex_key:
+        codex = await poll_codex_api(codex_key)
+        payload.update(codex if codex is not None else {"cx_ok": False})
+    else:
+        payload["cx_ok"] = False
+
     return payload
 
 

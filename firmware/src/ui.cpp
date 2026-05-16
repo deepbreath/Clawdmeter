@@ -46,6 +46,17 @@ static lv_obj_t* lbl_weekly_label;
 static lv_obj_t* lbl_weekly_reset;
 static lv_obj_t* lbl_anim;
 
+// ---- Codex screen widgets ----
+static lv_obj_t* codex_container;
+static lv_obj_t* lbl_cx_token_pct;
+static lv_obj_t* lbl_cx_token_label;
+static lv_obj_t* bar_cx_token;
+static lv_obj_t* lbl_cx_token_reset;
+static lv_obj_t* lbl_cx_req_pct;
+static lv_obj_t* lbl_cx_req_label;
+static lv_obj_t* bar_cx_req;
+static lv_obj_t* lbl_cx_req_reset;
+
 // ---- Bluetooth screen widgets ----
 static lv_obj_t* ble_container;
 static lv_obj_t* lbl_ble_status;
@@ -133,6 +144,18 @@ static void format_reset_time(int mins, char* buf, size_t len) {
         snprintf(buf, len, "Resets in %dh %dm", mins / 60, mins % 60);
     } else {
         snprintf(buf, len, "Resets in %dd %dh", mins / 1440, (mins % 1440) / 60);
+    }
+}
+
+static void format_reset_seconds(int secs, char* buf, size_t len) {
+    if (secs < 0) {
+        snprintf(buf, len, "---");
+    } else if (secs == 0) {
+        snprintf(buf, len, "Resetting...");
+    } else if (secs < 60) {
+        snprintf(buf, len, "Resets in %ds", secs);
+    } else {
+        snprintf(buf, len, "Resets in ~%dm", (secs + 59) / 60);
     }
 }
 
@@ -279,6 +302,34 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
 }
 
+// ======== Codex Screen (480x480) ========
+
+static void init_codex_screen(lv_obj_t* scr) {
+    codex_container = lv_obj_create(scr);
+    lv_obj_set_size(codex_container, SCR_W, SCR_H);
+    lv_obj_set_pos(codex_container, 0, 0);
+    lv_obj_set_style_bg_opa(codex_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(codex_container, 0, 0);
+    lv_obj_set_style_pad_all(codex_container, 0, 0);
+    lv_obj_clear_flag(codex_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(codex_container, global_click_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t* lbl_cx_title = lv_label_create(codex_container);
+    lv_label_set_text(lbl_cx_title, "Codex");
+    lv_obj_set_style_text_font(lbl_cx_title, &font_tiempos_56, 0);
+    lv_obj_set_style_text_color(lbl_cx_title, COL_TEXT, 0);
+    lv_obj_align(lbl_cx_title, LV_ALIGN_TOP_MID, 16, TITLE_Y);
+
+    make_usage_panel(codex_container, CONTENT_Y, "Tokens",
+                     &lbl_cx_token_pct, &lbl_cx_token_label,
+                     &bar_cx_token, &lbl_cx_token_reset);
+    make_usage_panel(codex_container, CONTENT_Y + PANEL_H + PANEL_GAP, "Requests",
+                     &lbl_cx_req_pct, &lbl_cx_req_label,
+                     &bar_cx_req, &lbl_cx_req_reset);
+
+    lv_obj_add_flag(codex_container, LV_OBJ_FLAG_HIDDEN);
+}
+
 // ======== Bluetooth Screen (480x480) ========
 
 static void init_bluetooth_screen(lv_obj_t* scr) {
@@ -384,6 +435,7 @@ void ui_init(void) {
     init_battery_icons();
 
     init_usage_screen(scr);
+    init_codex_screen(scr);
     init_bluetooth_screen(scr);
     splash_init(scr);
 
@@ -424,6 +476,27 @@ void ui_update(const UsageData* data) {
 
     format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
     lv_label_set_text(lbl_weekly_reset, buf);
+}
+
+void ui_update_codex(const CodexData* data) {
+    if (!data->valid) return;
+
+    int t_pct = (int)(data->token_pct + 0.5f);
+    lv_label_set_text_fmt(lbl_cx_token_pct, "%d%%", t_pct);
+    lv_bar_set_value(bar_cx_token, t_pct, LV_ANIM_ON);
+    lv_obj_set_style_bg_color(bar_cx_token, pct_color(data->token_pct), LV_PART_INDICATOR);
+
+    char buf[48];
+    format_reset_seconds(data->token_reset_s, buf, sizeof(buf));
+    lv_label_set_text(lbl_cx_token_reset, buf);
+
+    int r_pct = (int)(data->req_pct + 0.5f);
+    lv_label_set_text_fmt(lbl_cx_req_pct, "%d%%", r_pct);
+    lv_bar_set_value(bar_cx_req, r_pct, LV_ANIM_ON);
+    lv_obj_set_style_bg_color(bar_cx_req, pct_color(data->req_pct), LV_PART_INDICATOR);
+
+    format_reset_seconds(data->token_reset_s, buf, sizeof(buf));
+    lv_label_set_text(lbl_cx_req_reset, buf);
 }
 
 void ui_tick_anim(void) {
@@ -476,12 +549,14 @@ static void ble_reset_click_cb(lv_event_t* e) {
 
 void ui_show_screen(screen_t screen) {
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(codex_container, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(ble_container, LV_OBJ_FLAG_HIDDEN);
     splash_hide();
 
     switch (screen) {
     case SCREEN_SPLASH:     splash_show(); break;
     case SCREEN_USAGE:      lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_CODEX:      lv_obj_clear_flag(codex_container, LV_OBJ_FLAG_HIDDEN); break;
     case SCREEN_BLUETOOTH:  lv_obj_clear_flag(ble_container, LV_OBJ_FLAG_HIDDEN); break;
     default: break;
     }
@@ -498,7 +573,12 @@ void ui_show_screen(screen_t screen) {
 }
 
 void ui_cycle_screen(void) {
-    screen_t next = (current_screen == SCREEN_USAGE) ? SCREEN_BLUETOOTH : SCREEN_USAGE;
+    screen_t next;
+    switch (current_screen) {
+    case SCREEN_USAGE:      next = SCREEN_CODEX;     break;
+    case SCREEN_CODEX:      next = SCREEN_BLUETOOTH; break;
+    default:                next = SCREEN_USAGE;     break;
+    }
     ui_show_screen(next);
 }
 

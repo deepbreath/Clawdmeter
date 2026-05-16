@@ -28,6 +28,7 @@ XPowersPMU pmu;
 SensorQMI8658 imu;
 
 static UsageData usage = {};
+static CodexData codex = {};
 
 // ---- Touch interrupt + shared state ----
 static volatile bool     touch_pressed = false;
@@ -154,8 +155,8 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     }
 }
 
-// Parse a JSON line into UsageData
-static bool parse_json(const char* json, UsageData* out) {
+// Parse a JSON line into UsageData (and optionally CodexData)
+static bool parse_json(const char* json, UsageData* out, CodexData* cx_out) {
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, json);
     if (err) {
@@ -170,6 +171,16 @@ static bool parse_json(const char* json, UsageData* out) {
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     out->ok = doc["ok"] | false;
     out->valid = true;
+
+    if (cx_out) {
+        float cx_ts = doc["cx_ts"] | -1.0f;
+        cx_out->token_pct    = (cx_ts >= 0.0f) ? cx_ts : 0.0f;
+        cx_out->token_reset_s = doc["cx_tr"] | -1;
+        cx_out->req_pct      = doc["cx_rs"] | 0.0f;
+        cx_out->ok           = doc["cx_ok"] | false;
+        cx_out->valid        = cx_out->ok;
+    }
+
     return true;
 }
 
@@ -390,7 +401,7 @@ void loop() {
 
     // Process incoming BLE data
     if (ble_has_data()) {
-        if (parse_json(ble_get_data(), &usage)) {
+        if (parse_json(ble_get_data(), &usage, &codex)) {
             int g_before = usage_rate_group();
             usage_rate_sample(usage.session_pct);
             int g_after = usage_rate_group();
@@ -400,6 +411,7 @@ void loop() {
                 if (splash_is_active()) splash_pick_for_current_rate();
             }
             ui_update(&usage);
+            ui_update_codex(&codex);
             ble_send_ack();
         } else {
             ble_send_nack();

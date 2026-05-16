@@ -10,3 +10,11 @@ struct UsageData {
     bool ok;                 // data parse succeeded
     bool valid;              // false until first successful parse
 };
+
+struct CodexData {
+    float token_pct;      // current-minute token utilization (0-100)
+    int   token_reset_s;  // seconds until token rate limit resets
+    float req_pct;        // current-minute request utilization (0-100)
+    bool  ok;
+    bool  valid;          // false until first successful parse
+};
