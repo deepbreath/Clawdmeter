@@ -17,13 +17,13 @@
 #define LCD_SDIO1   5
 #define LCD_SDIO2   6
 #define LCD_SDIO3   7
-#define LCD_RESET   2
+#define LCD_RESET   39
 
 // ---- Touch pins (CST9220 via I2C) ----
 #define IIC_SDA     15
 #define IIC_SCL     14
 #define TP_INT      11
-#define TP_RST      2    // shared with LCD_RESET
+#define TP_RST      40
 #define CST9220_ADDR 0x5A
 
 // ---- PMU (AXP2101 via same I2C) ----

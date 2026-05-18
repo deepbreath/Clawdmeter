@@ -2,6 +2,21 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Current hardware bring-up memory
+
+Before changing SD, USB MSC, ES8311/I2S audio, or button GPIOs, read `docs/bringup-notes.md`.
+
+Known-good values from the successful debug session:
+
+- Display reset is GPIO39; touch reset is GPIO40.
+- Onboard TF card is SDMMC 1-bit: `CLK=2`, `CMD=1`, `D0=3`; it is not SPI.
+- USB MSC mode is most reliably entered with the serial command `msc`.
+- USB MSC requires `RTC_NOINIT_ATTR` magic across soft reboot and an explicit `USB.begin()` after `USBMSC.begin(...)`.
+- Audio is 16 kHz / 16-bit PCM. The ES8311 MCLK is 4.096 MHz (`16000 * 256`), not a 4 kHz sample rate.
+- ES8311/I2S pins: `MCLK=42`, `BCLK=9`, `WS=45`, `DOUT=8`, `PA_EN=46`.
+- Do not configure GPIO9 or GPIO10 as buttons; GPIO9 is I2S BCLK and GPIO10 is mic DIN. Reconfiguring them caused silent audio.
+- Current anti-clipping values: ES8311 DAC volume register `0x32=0xB2`, PCM gain `2/3`, test tone gain `0.45`.
+
 # Project context
 
 ESP32-S3 firmware for a desk-side Claude Code usage monitor on a **Waveshare ESP32-S3-Touch-AMOLED-2.16** board (480×480 square AMOLED). Connects to a host daemon over BLE; daemon polls Anthropic API for usage data.

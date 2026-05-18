@@ -10,13 +10,16 @@
 #include "splash.h"
 #include "usage_rate.h"
 #include "sound.h"
+#include "audio_stream.h"
+#include "sd_card.h"
+#include "sd_phrases.h"
+#include "usb_msc.h"
 
 // Physical buttons (global, screen-independent):
-//   BTN_BACK   (GPIO 0)  — left,  send Space (Claude Code voice mode push-to-talk)
-//   BTN_FWD    (GPIO 18) — right, send Shift+Tab (Claude Code mode toggle)
-//   AXP PWR    (PMU)     — middle, cycle screens; on splash, cycle animations
-#define BTN_BACK 0
-#define BTN_FWD  18
+//   BTN_MID    (GPIO 18) — middle, cycle screens; on splash, cycle animations
+//                          hold at boot → USB Drive Mode (MSC)
+// GPIO9/GPIO10 are reserved for I2S audio and must not be configured as buttons.
+#define BTN_MID  18
 
 // ---- Hardware objects ----
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
@@ -229,6 +232,13 @@ static void check_serial_cmd() {
             cmd_buf[cmd_pos] = '\0';
             if (strcmp(cmd_buf, "screenshot") == 0) {
                 send_screenshot();
+            } else if (strcmp(cmd_buf, "msc") == 0) {
+                Serial.println("[MSC] serial command received - rebooting into USB drive mode");
+                Serial.flush();
+                delay(50);
+                usb_msc_request();
+            } else if (strcmp(cmd_buf, "tone") == 0) {
+                sound_debug_tone();
             } else if (strncmp(cmd_buf, "sound", 5) == 0) {
                 int n = (cmd_pos > 5) ? atoi(cmd_buf + 6) : 2;
                 if (n < 1 || n > 4) n = 2;
@@ -243,23 +253,51 @@ static void check_serial_cmd() {
 }
 
 void setup() {
-    Serial.begin(115200);
-    delay(300);
-    Serial.println("{\"ready\":true}");
+    // Sample middle button (GPIO18/BTN_MID) at boot for USB MSC mode.
+    // GPIO0 is an ESP32-S3 strapping pin (causes ROM download mode if held at
+    // reset), so we use GPIO18, the accessible side button.
+    pinMode(BTN_MID, INPUT_PULLUP);
+    delay(10);
+    bool msc_boot_held = (digitalRead(BTN_MID) == LOW);
 
-    // Init I2C (shared by touch + PMU)
+    Serial.begin(115200);
+
+    // No delay(300) yet — MSC boot must reach sd_msc_init() before Windows
+    // completes USB enumeration; otherwise it caches "no media" and never
+    // retries. The delay is added below for the normal-boot path only.
+
+    // I2C bus (shared by PMU, touch, IMU)
     Wire.begin(IIC_SDA, IIC_SCL);
 
-    // Init display
+    // Display must init before PMU: PMU reconfigures power rails that the
+    // AMOLED needs in their default (POR) state.
     gfx->begin();
     gfx->fillScreen(0x0000);
     gfx->setBrightness(200);
 
-    // Init PMU
+    // PMU init after display; SD card power also comes from AXP2101.
     power_init();
 
-    // Init audio codec
+    // USB MSC mode: hold middle button (GPIO18/BTN_MID) at boot.
+    // Activated BEFORE delay(300) so SD is ready before Windows reads
+    // sector 0 during USB enumeration.
+    if (usb_msc_try_activate(msc_boot_held)) {
+        Serial.println("{\"mode\":\"usb_msc\"}");
+        // Green screen = USB drive mode active. No LVGL here, avoid raw GFX
+        // text which garbles on CO5300 without full font init.
+        gfx->fillScreen(0x07E0);
+        Serial.println("[MSC] looping — SD owned by USB host");
+        while (true) { delay(1000); }
+    }
+
+    delay(300);
+    Serial.println("{\"ready\":true}");
+
+    // Init audio codec + Opus decoder + SD card + phrase library
     sound_init();
+    audio_stream_init();
+    sd_init();
+    sd_phrases_init();
 
     // Init IMU (accelerometer for auto-rotation)
     imu_init();
@@ -303,9 +341,8 @@ void setup() {
     // Init BLE data channel
     ble_init();
 
-    // Physical buttons: back (GPIO 0) and forward (GPIO 18)
-    pinMode(BTN_BACK, INPUT_PULLUP);
-    pinMode(BTN_FWD,  INPUT_PULLUP);
+    // Physical button. Leave GPIO9/GPIO10 alone; they are I2S audio pins.
+    pinMode(BTN_MID, INPUT_PULLUP);   // GPIO18 middle
 
     // Build dashboard
     ui_init();
@@ -361,26 +398,19 @@ void loop() {
     imu_tick();
     splash_tick();
 
-    // Three-button input (global, screen-independent):
-    //   LEFT  (GPIO 0)  → Space (voice-mode push-to-talk; press & release tracked)
-    //   RIGHT (GPIO 18) → Shift+Tab (Claude Code mode toggle)
-    //   PWR   (AXP)     → cycle screens; on splash, cycle animations
+    // Button input:
+    //   MIDDLE (GPIO18) -> cycle screens; hold at boot -> USB Drive Mode
+    // GPIO9/GPIO10 are I2S BCLK/DIN and are not safe as buttons.
     {
-        static bool back_was = false, fwd_was = false;
-        bool back_now = (digitalRead(BTN_BACK) == LOW);
-        bool fwd_now  = (digitalRead(BTN_FWD)  == LOW);
-
-        if (back_now != back_was) {
-            if (back_now) ble_keyboard_press(0x2C, 0);  // HID Space, no mods
-            else          ble_keyboard_release();
-            back_was = back_now;
+        static bool mid_was = false;
+        bool mid_now  = (digitalRead(BTN_MID)  == LOW);
+        if (mid_now && !mid_was) {
+            if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
+            else                                          ui_cycle_screen();
         }
-        if (fwd_now != fwd_was) {
-            if (fwd_now) ble_keyboard_press(0x2B, 0x02);  // HID Tab + LEFT_SHIFT
-            else         ble_keyboard_release();
-            fwd_was = fwd_now;
-        }
+        mid_was = mid_now;
 
+        // AXP power key still works as fallback for screen cycling
         if (power_pwr_pressed()) {
             if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
             else                                          ui_cycle_screen();
@@ -426,6 +456,15 @@ void loop() {
             ui_update_codex(&codex);
             if (evt != EVT_NONE) sound_play(evt);
             ble_send_ack();
+
+            // Log to SD card: uptime_ms,session_pct,session_reset_mins,weekly_pct,status
+            if (sd_ready()) {
+                char log_row[96];
+                snprintf(log_row, sizeof(log_row), "%lu,%.1f,%d,%.1f,%s",
+                    millis(), usage.session_pct, usage.session_reset_mins,
+                    usage.weekly_pct, usage.status);
+                sd_log_usage(log_row);
+            }
         } else {
             ble_send_nack();
         }

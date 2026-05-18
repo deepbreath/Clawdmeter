@@ -2,6 +2,9 @@
 #include "splash_animations.h"
 #include "theme.h"
 #include "usage_rate.h"
+#include "sound.h"
+#include "ble.h"
+#include "sd_phrases.h"
 #include <Arduino.h>
 #include <string.h>
 #include <esp_heap_caps.h>
@@ -16,11 +19,17 @@
 #define COL_EMPTY    0x0000  // true black (matches THEME_BG)
 
 LV_FONT_DECLARE(font_styrene_28);
+LV_FONT_DECLARE(font_styrene_14);
 
 static lv_obj_t *splash_container = NULL;
 static lv_obj_t *canvas = NULL;
 static lv_obj_t *label_status = NULL;     // shown only when no animations loaded
 static uint16_t *canvas_buf = NULL;        // 480x480 RGB565 (PSRAM)
+
+static lv_obj_t *fish_bubble = NULL;      // speech bubble container
+static lv_obj_t *fish_label  = NULL;      // text inside bubble
+static uint32_t  fish_show_ms = 0;
+#define FISH_HIDE_AFTER_MS 12000          // auto-hide after 12 s
 
 static uint16_t cur_anim = 0;
 static uint16_t cur_frame = 0;
@@ -133,11 +142,40 @@ void splash_init(lv_obj_t *parent) {
         frame_started_ms = millis();
     }
 
+    // Fish speech bubble — overlays the bottom portion of the canvas
+    fish_bubble = lv_obj_create(splash_container);
+    lv_obj_set_width(fish_bubble, 440);
+    lv_obj_set_height(fish_bubble, LV_SIZE_CONTENT);
+    lv_obj_align(fish_bubble, LV_ALIGN_BOTTOM_MID, 0, -16);
+    lv_obj_set_style_bg_color(fish_bubble, lv_color_hex(0x0D0F1A), 0);
+    lv_obj_set_style_bg_opa(fish_bubble, LV_OPA_80, 0);
+    lv_obj_set_style_radius(fish_bubble, 14, 0);
+    lv_obj_set_style_border_width(fish_bubble, 1, 0);
+    lv_obj_set_style_border_color(fish_bubble, lv_color_hex(0x3D4F7C), 0);
+    lv_obj_set_style_pad_all(fish_bubble, 12, 0);
+    lv_obj_clear_flag(fish_bubble, LV_OBJ_FLAG_SCROLLABLE);
+
+    fish_label = lv_label_create(fish_bubble);
+    lv_obj_set_width(fish_label, 416);
+    lv_label_set_long_mode(fish_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(fish_label, &font_styrene_14, 0);
+    lv_obj_set_style_text_color(fish_label, lv_color_hex(0xC8C5BE), 0);
+    lv_obj_set_style_text_align(fish_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(fish_label, "");
+
+    lv_obj_add_flag(fish_bubble, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(splash_container, LV_OBJ_FLAG_HIDDEN);
 }
 
 void splash_tick(void) {
     if (!active || SPLASH_ANIM_COUNT == 0) return;
+
+    // Auto-hide fish speech bubble after timeout
+    if (fish_bubble && fish_show_ms &&
+        millis() - fish_show_ms >= FISH_HIDE_AFTER_MS) {
+        lv_obj_add_flag(fish_bubble, LV_OBJ_FLAG_HIDDEN);
+        fish_show_ms = 0;
+    }
 
     // Auto-rotate to the next animation in the current group.
     if (millis() - last_pick_ms >= SPLASH_ROTATE_INTERVAL_MS) {
@@ -183,6 +221,21 @@ void splash_pick_for_current_rate(void) {
     last_pick_ms = frame_started_ms;
     const splash_anim_def_t *a = &splash_anims[cur_anim];
     render_frame(a->frames[0], a->palette);
+
+    // Voice priority (highest to lowest):
+    //   1. BLE stream from daemon (fish_voice.py) — s_stream_active guard in sound.cpp
+    //   2. SD phrase library — random, non-repeating, works offline
+    //   3. Compiled-in PCM fallback — last resort when SD not populated
+    if (!sd_phrase_play(g)) {
+        // SD phrases missing or audio busy — fall back to static PCM only when
+        // daemon is not connected (daemon handles live voice when connected).
+        if (ble_get_state() != BLE_STATE_CONNECTED) {
+            static const sound_event_t fish_evts[GROUP_COUNT] = {
+                EVT_FISH_IDLE, EVT_FISH_NORM, EVT_FISH_ACTIVE, EVT_FISH_HEAVY
+            };
+            sound_play_async(fish_evts[g]);
+        }
+    }
 }
 
 bool splash_is_active(void) { return active; }
@@ -200,4 +253,16 @@ void splash_hide(void) {
 
 lv_obj_t* splash_get_root(void) {
     return splash_container;
+}
+
+void splash_set_fish_text(const char* text) {
+    if (!fish_bubble || !fish_label) return;
+    if (!text || text[0] == '\0') {
+        lv_obj_add_flag(fish_bubble, LV_OBJ_FLAG_HIDDEN);
+        fish_show_ms = 0;
+        return;
+    }
+    lv_label_set_text(fish_label, text);
+    lv_obj_clear_flag(fish_bubble, LV_OBJ_FLAG_HIDDEN);
+    fish_show_ms = millis();
 }

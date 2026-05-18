@@ -57,6 +57,23 @@ void power_init(void) {
 
     cached_charging = pmu.isCharging();
     cached_pct = voltage_to_pct(pmu.getBattVoltage());
+
+    // Dump all LDO/DC states — needed to diagnose SD card power rail
+    Serial.printf("AXP DC:   DC1=%s/%dmV  DC2=%s/%dmV  DC3=%s/%dmV  DC4=%s/%dmV\n",
+        pmu.isEnableDC1()?"ON":"--", pmu.getDC1Voltage(),
+        pmu.isEnableDC2()?"ON":"--", pmu.getDC2Voltage(),
+        pmu.isEnableDC3()?"ON":"--", pmu.getDC3Voltage(),
+        pmu.isEnableDC4()?"ON":"--", pmu.getDC4Voltage());
+    Serial.printf("AXP ALDO: 1=%s/%d  2=%s/%d  3=%s/%d  4=%s/%d mV\n",
+        pmu.isEnableALDO1()?"ON":"--", pmu.getALDO1Voltage(),
+        pmu.isEnableALDO2()?"ON":"--", pmu.getALDO2Voltage(),
+        pmu.isEnableALDO3()?"ON":"--", pmu.getALDO3Voltage(),
+        pmu.isEnableALDO4()?"ON":"--", pmu.getALDO4Voltage());
+    Serial.printf("AXP BLDO: 1=%s/%d  2=%s/%d  DLDO: 1=%s/%d  2=%s/%d mV\n",
+        pmu.isEnableBLDO1()?"ON":"--", pmu.getBLDO1Voltage(),
+        pmu.isEnableBLDO2()?"ON":"--", pmu.getBLDO2Voltage(),
+        pmu.isEnableDLDO1()?"ON":"--", pmu.getDLDO1Voltage(),
+        pmu.isEnableDLDO2()?"ON":"--", pmu.getDLDO2Voltage());
 }
 
 void power_tick(void) {

@@ -26,3 +26,7 @@ bool splash_is_active(void);
 
 // Root container (so ui.cpp can attach a click event).
 lv_obj_t* splash_get_root(void);
+
+// Display fish-personality text in a speech bubble at the bottom of the screen.
+// Pass nullptr or "" to hide the bubble.
+void splash_set_fish_text(const char* text);

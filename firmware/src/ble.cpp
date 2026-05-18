@@ -1,4 +1,6 @@
 #include "ble.h"
+#include "audio_stream.h"
+#include "splash.h"
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <NimBLEHIDDevice.h>
@@ -10,6 +12,8 @@
 #define RX_CHAR_UUID        "4c41555a-4465-7669-6365-000000000002"  // host writes here
 #define TX_CHAR_UUID        "4c41555a-4465-7669-6365-000000000003"  // device ack/nack notifies
 #define REQ_CHAR_UUID       "4c41555a-4465-7669-6365-000000000004"  // device-initiated refresh request
+#define AUDIO_CHAR_UUID     "4c41555a-4465-7669-6365-000000000005"  // host streams Opus/ADPCM frames here
+#define TEXT_CHAR_UUID      "4c41555a-4465-7669-6365-000000000006"  // host writes fish text for display
 
 #define BLE_BUF_SIZE 512
 
@@ -47,6 +51,8 @@ static NimBLECharacteristic* input_kbd = nullptr;
 static NimBLECharacteristic* tx_char = nullptr;
 static NimBLECharacteristic* rx_char = nullptr;
 static NimBLECharacteristic* req_char = nullptr;
+static NimBLECharacteristic* audio_char = nullptr;
+static NimBLECharacteristic* text_char  = nullptr;
 
 static ble_state_t state = BLE_STATE_INIT;
 static bool need_advertise = false;
@@ -71,6 +77,9 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer* s, NimBLEConnInfo& info) override {
         state = BLE_STATE_CONNECTED;
         Serial.printf("BLE: connected from %s\n", info.getAddress().toString().c_str());
+        // Request short connection interval for audio streaming headroom.
+        // Units: 1.25 ms.  min=12→15 ms, max=24→30 ms, latency=0, timeout=200→2 s.
+        s->updateConnParams(info.getConnHandle(), 12, 24, 0, 200);
     }
 
     void onDisconnect(NimBLEServer* s, NimBLEConnInfo& info, int reason) override {
@@ -96,6 +105,26 @@ class RxCallbacks : public NimBLECharacteristicCallbacks {
 // When the daemon enables notifications on the refresh char, ask for data
 // if we have none yet. Firing on subscribe (not on connect) ensures the
 // notification isn't dropped before the daemon's CCCD write completes.
+class AudioCallbacks : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* chr, NimBLEConnInfo& info) override {
+        std::string val = chr->getValue();
+        audio_stream_push((const uint8_t*)val.data(), val.length());
+    }
+};
+
+class TextCallbacks : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* chr, NimBLEConnInfo& info) override {
+        std::string val = chr->getValue();
+        // Null-terminate for safety before passing to LVGL
+        static char text_buf[256];
+        size_t n = val.length();
+        if (n >= sizeof(text_buf)) n = sizeof(text_buf) - 1;
+        memcpy(text_buf, val.c_str(), n);
+        text_buf[n] = '\0';
+        splash_set_fish_text(text_buf);
+    }
+};
+
 class ReqCallbacks : public NimBLECharacteristicCallbacks {
     void onSubscribe(NimBLECharacteristic* chr, NimBLEConnInfo& info, uint16_t subValue) override {
         Serial.printf("BLE: req_char onSubscribe subValue=%u has_data=%d\n", subValue, has_received_data ? 1 : 0);
@@ -151,7 +180,20 @@ void ble_init(void) {
     static ReqCallbacks reqCb;
     req_char->setCallbacks(&reqCb);
 
-    svc->start();
+    audio_char = svc->createCharacteristic(
+        AUDIO_CHAR_UUID,
+        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR
+    );
+    static AudioCallbacks audioCb;
+    audio_char->setCallbacks(&audioCb);
+
+    text_char = svc->createCharacteristic(
+        TEXT_CHAR_UUID,
+        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR
+    );
+    static TextCallbacks textCb;
+    text_char->setCallbacks(&textCb);
+
     server->start();
     start_advertising();
 

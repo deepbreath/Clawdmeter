@@ -6,6 +6,11 @@ typedef enum {
     EVT_COMPLETE,
     EVT_ERROR,
     EVT_INPUT,
+    // Fish-personality splash voice (one per usage-rate group 0-3)
+    EVT_FISH_IDLE,
+    EVT_FISH_NORM,
+    EVT_FISH_ACTIVE,
+    EVT_FISH_HEAVY,
 } sound_event_t;
 
 struct UsageData {

@@ -21,10 +21,18 @@ import httpx
 from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError
 
+try:
+    from fish_voice import FishVoice
+    _fish = FishVoice()
+    _fish.try_load()
+except ImportError:
+    _fish = None  # type: ignore
+
 DEVICE_NAME = "Claude Controller"
-SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
-RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
-REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
+SERVICE_UUID    = "4c41555a-4465-7669-6365-000000000001"
+RX_CHAR_UUID    = "4c41555a-4465-7669-6365-000000000002"
+REQ_CHAR_UUID   = "4c41555a-4465-7669-6365-000000000004"
+AUDIO_CHAR_UUID = "4c41555a-4465-7669-6365-000000000005"
 
 POLL_INTERVAL = 10
 TICK = 1
@@ -302,10 +310,21 @@ async def poll_api(token: str) -> dict | None:
     return payload
 
 
+def _usage_group_from_payload(payload: dict) -> int:
+    """Map session utilisation % to the same 4-group scale as the firmware."""
+    s = payload.get("s", 0)
+    if s < 10:   return 0  # idle
+    if s < 30:   return 1  # normal
+    if s < 60:   return 2  # active
+    return 3               # heavy
+
+
 class Session:
     def __init__(self, client: BleakClient) -> None:
         self.client = client
         self.refresh_requested = asyncio.Event()
+        self._fish_task: asyncio.Task | None = None
+        self._connect_time = time.time()
 
     def _on_refresh(self, _char, _data: bytearray) -> None:
         log("Refresh requested by device")
@@ -328,10 +347,20 @@ class Session:
         log(f"Sending: {data.decode()}")
         try:
             await self.client.write_gatt_char(RX_CHAR_UUID, data, response=False)
-            return True
         except BleakError as e:
             log(f"Write failed: {e}")
             return False
+
+        # Trigger autonomous fish speech after connect warm-up, if due
+        if (_fish and _fish.available
+                and time.time() - self._connect_time >= 5
+                and (self._fish_task is None or self._fish_task.done())):
+            group = _usage_group_from_payload(payload)
+            if _fish.should_speak(group):
+                self._fish_task = asyncio.create_task(
+                    _fish.speak(self.client, group))
+
+        return True
 
 
 async def connect_and_run(address_or_device, stop_event: asyncio.Event) -> bool:
