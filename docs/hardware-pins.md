@@ -39,7 +39,7 @@ The onboard TF card slot uses SDMMC 1-bit mode, not SPI mode.
 |---|---:|---:|
 | ES7210 mic ADC (I2C) | SDA / SCL | 15 / 14 |
 | ES7210 mic ADC | I2C address | 0x40 |
-| ES7210 (I2S) | MCLK | 16 |
+| ES7210 (I2S) | MCLK | 42 |
 | ES7210 (I2S) | BCLK | 9 |
 | ES7210 (I2S) | LRCK / WS | 45 |
 | ES7210 (I2S) | DIN (data to ESP32) | 10 |

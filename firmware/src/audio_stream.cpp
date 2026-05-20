@@ -165,11 +165,11 @@ void audio_stream_push(const uint8_t* data, size_t len) {
 
     // Start playback task on first frame
     if (!s_active) {
+        if (!sound_try_start_stream()) return;
         s_head = s_tail = 0;
         s_eos = false;
-        sound_set_stream_active(true);
         s_active = true;
-        xTaskCreate(playback_task, "opus_play", 8192, nullptr, 5, nullptr);
+        xTaskCreate(playback_task, "opus_play", 6144, nullptr, 5, nullptr);
     }
 
     const uint8_t* payload = data + 1;

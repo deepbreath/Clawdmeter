@@ -65,7 +65,9 @@ static lv_obj_t* lbl_ble_mac;
 
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
+static lv_obj_t* wifi_label;
 static lv_obj_t* logo_img;
+static lv_obj_t* lbl_recorder_status;
 static lv_image_dsc_t battery_dscs[5];  // empty, low, medium, full, charging
 
 // ---- Shared ----
@@ -453,6 +455,18 @@ void ui_init(void) {
     battery_img = lv_image_create(scr);
     lv_image_set_src(battery_img, &battery_dscs[0]);
     lv_obj_set_pos(battery_img, SCR_W - 48 - MARGIN, TITLE_Y);
+
+    wifi_label = lv_label_create(scr);
+    lv_label_set_text(wifi_label, LV_SYMBOL_WIFI);
+    lv_obj_set_style_text_color(wifi_label, COL_DIM, 0);
+    lv_obj_set_pos(wifi_label, SCR_W - 48 - MARGIN - 34, TITLE_Y + 10);
+
+    lbl_recorder_status = lv_label_create(scr);
+    lv_label_set_text(lbl_recorder_status, "");
+    lv_obj_set_style_text_font(lbl_recorder_status, &font_styrene_20, 0);
+    lv_obj_set_style_text_color(lbl_recorder_status, COL_ACCENT, 0);
+    lv_obj_align(lbl_recorder_status, LV_ALIGN_TOP_MID, 0, 82);
+    lv_obj_add_flag(lbl_recorder_status, LV_OBJ_FLAG_HIDDEN);
 }
 
 void ui_update(const UsageData* data) {
@@ -527,9 +541,12 @@ static screen_t prev_non_splash_screen = SCREEN_USAGE;
 // Hide the battery indicator on the splash screen — the icon is visually
 // noisy over the pixel-art creature animations.
 static void apply_battery_visibility(void) {
-    if (!battery_img) return;
-    if (current_screen == SCREEN_SPLASH) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
-    else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_t* icons[] = { battery_img, wifi_label };
+    for (size_t i = 0; i < sizeof(icons) / sizeof(icons[0]); i++) {
+        if (!icons[i]) continue;
+        if (current_screen == SCREEN_SPLASH) lv_obj_add_flag(icons[i], LV_OBJ_FLAG_HIDDEN);
+        else                                  lv_obj_clear_flag(icons[i], LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 // LVGL handles click debouncing internally. Screen-level handler fires when
@@ -565,6 +582,11 @@ void ui_show_screen(screen_t screen) {
     if (logo_img) {
         if (screen == SCREEN_SPLASH) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
         else                          lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (lbl_recorder_status) {
+        if (screen == SCREEN_SPLASH) lv_obj_add_flag(lbl_recorder_status, LV_OBJ_FLAG_HIDDEN);
+        else if (lv_label_get_text(lbl_recorder_status)[0])
+            lv_obj_clear_flag(lbl_recorder_status, LV_OBJ_FLAG_HIDDEN);
     }
 
     if (screen != SCREEN_SPLASH) prev_non_splash_screen = screen;
@@ -639,4 +661,28 @@ void ui_update_battery(int percent, bool charging) {
     }
     lv_image_set_src(battery_img, &battery_dscs[idx]);
     apply_battery_visibility();
+}
+
+void ui_update_wifi_status(bool connected, int rssi) {
+    if (!wifi_label) return;
+    if (!connected) {
+        lv_obj_set_style_text_color(wifi_label, COL_DIM, 0);
+    } else if (rssi >= -67) {
+        lv_obj_set_style_text_color(wifi_label, COL_GREEN, 0);
+    } else if (rssi >= -78) {
+        lv_obj_set_style_text_color(wifi_label, COL_AMBER, 0);
+    } else {
+        lv_obj_set_style_text_color(wifi_label, COL_RED, 0);
+    }
+    apply_battery_visibility();
+}
+
+void ui_update_recorder_status(const char* status) {
+    if (!lbl_recorder_status || !status) return;
+    lv_label_set_text(lbl_recorder_status, status);
+    if (status[0] && current_screen != SCREEN_SPLASH) {
+        lv_obj_clear_flag(lbl_recorder_status, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(lbl_recorder_status, LV_OBJ_FLAG_HIDDEN);
+    }
 }

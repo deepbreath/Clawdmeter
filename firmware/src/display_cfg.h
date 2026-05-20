@@ -31,7 +31,7 @@
 
 // ---- Audio (ES8311 speaker codec + ES7210 mic ADC, shared I2S bus) ----
 #define I2S_MCLK_ES8311  42
-#define I2S_MCLK_ES7210  16
+#define I2S_MCLK_ES7210  42
 #define I2S_BCK          9
 #define I2S_WS           45
 #define I2S_DO           8    // ESP32 → ES8311 (speaker output)

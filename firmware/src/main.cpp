@@ -14,12 +14,16 @@
 #include "sd_card.h"
 #include "sd_phrases.h"
 #include "usb_msc.h"
+#include "recorder.h"
+#include "wifi_manager.h"
+#include "wifi_backup.h"
+#include <esp_heap_caps.h>
 
 // Physical buttons (global, screen-independent):
-//   BTN_MID    (GPIO 18) — middle, cycle screens; on splash, cycle animations
-//                          hold at boot → USB Drive Mode (MSC)
+//   KEY3_IO18  (GPIO 18) — double-click to start/stop recorder; hold at boot → USB Drive Mode (MSC)
+//   AXP PKEY   (Key1/PWR) — short-press cycles screens/animations; long-press is power
 // GPIO9/GPIO10 are reserved for I2S audio and must not be configured as buttons.
-#define BTN_MID  18
+#define KEY3_IO18  18
 
 // ---- Hardware objects ----
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
@@ -225,6 +229,25 @@ static void send_screenshot() {
     heap_caps_free(sbuf);
 }
 
+static void scan_i2c_bus() {
+    Serial.println("i2c: scanning");
+    int found = 0;
+    for (uint8_t addr = 1; addr < 127; addr++) {
+        Wire.beginTransmission(addr);
+        uint8_t err = Wire.endTransmission();
+        if (err == 0) {
+            Serial.printf("i2c: found 0x%02X", addr);
+            if (addr == AXP2101_ADDR) Serial.print(" AXP2101");
+            if (addr == CST9220_ADDR) Serial.print(" CST9220");
+            if (addr == ES8311_ADDR) Serial.print(" ES8311");
+            if (addr == ES7210_ADDR) Serial.print(" ES7210");
+            Serial.println();
+            found++;
+        }
+    }
+    Serial.printf("i2c: %d device(s)\n", found);
+}
+
 static void check_serial_cmd() {
     while (Serial.available()) {
         char c = Serial.read();
@@ -234,8 +257,9 @@ static void check_serial_cmd() {
                 send_screenshot();
             } else if (strcmp(cmd_buf, "msc") == 0) {
                 Serial.println("[MSC] serial command received - rebooting into USB drive mode");
+                sd_end();
                 Serial.flush();
-                delay(50);
+                delay(200);
                 usb_msc_request();
             } else if (strcmp(cmd_buf, "tone") == 0) {
                 sound_debug_tone();
@@ -244,6 +268,51 @@ static void check_serial_cmd() {
                 if (n < 1 || n > 4) n = 2;
                 Serial.printf("sound_play(%d)\n", n);
                 sound_play((sound_event_t)n);
+            } else if (strcmp(cmd_buf, "rec") == 0) {
+                recorder_toggle();
+            } else if (strncmp(cmd_buf, "recmode", 7) == 0) {
+                const char* mode = (cmd_pos > 8) ? (cmd_buf + 8) : "";
+                if (!recorder_set_capture_mode(mode)) {
+                    Serial.printf("recorder: capture mode=%s; use: recmode auto|slot0|slot1|slot2|slot3|swap0|swap1|swap2|swap3|mix|tdmraw|es8311\n",
+                                  recorder_capture_mode());
+                }
+            } else if (strncmp(cmd_buf, "recrate", 7) == 0) {
+                uint32_t rate = (cmd_pos > 8) ? (uint32_t)atoi(cmd_buf + 8) : 0;
+                if (!recorder_set_sample_rate(rate)) {
+                    Serial.printf("recorder: sample rate=%lu; use: recrate 16000|48000\n",
+                                  (unsigned long)recorder_sample_rate());
+                }
+            } else if (strcmp(cmd_buf, "recplay") == 0) {
+                if (recorder_is_recording()) {
+                    Serial.println("recorder: play blocked while recording");
+                    cmd_pos = 0;
+                    continue;
+                }
+                const char* path = recorder_last_wav_path();
+                if (path) {
+                    Serial.printf("recorder: play %s\n", path);
+                    if (!sd_play_wav(path)) Serial.printf("recorder: play failed (dma=%u)\n", (unsigned)sd_dma_free());
+                } else {
+                    Serial.println("recorder: no recording yet");
+                }
+            } else if (strcmp(cmd_buf, "recanalyze") == 0) {
+                recorder_analyze_last_wav();
+            } else if (strcmp(cmd_buf, "upload") == 0) {
+                wifi_backup_request_upload();
+            } else if (strcmp(cmd_buf, "wifi") == 0) {
+                wifi_manager_print_status();
+                wifi_backup_print_status();
+            } else if (strcmp(cmd_buf, "mem") == 0) {
+                Serial.printf("mem: free=%u internal=%u dma=%u psram=%u min_free=%u\n",
+                              (unsigned)ESP.getFreeHeap(),
+                              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                              (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+                              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                              (unsigned)ESP.getMinFreeHeap());
+            } else if (strcmp(cmd_buf, "sd") == 0) {
+                sd_print_status();
+            } else if (strcmp(cmd_buf, "i2c") == 0) {
+                scan_i2c_bus();
             }
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
@@ -253,12 +322,12 @@ static void check_serial_cmd() {
 }
 
 void setup() {
-    // Sample middle button (GPIO18/BTN_MID) at boot for USB MSC mode.
+    // Sample Key3 (GPIO18) at boot for USB MSC mode.
     // GPIO0 is an ESP32-S3 strapping pin (causes ROM download mode if held at
     // reset), so we use GPIO18, the accessible side button.
-    pinMode(BTN_MID, INPUT_PULLUP);
+    pinMode(KEY3_IO18, INPUT_PULLUP);
     delay(10);
-    bool msc_boot_held = (digitalRead(BTN_MID) == LOW);
+    bool msc_boot_held = (digitalRead(KEY3_IO18) == LOW);
 
     Serial.begin(115200);
 
@@ -278,7 +347,7 @@ void setup() {
     // PMU init after display; SD card power also comes from AXP2101.
     power_init();
 
-    // USB MSC mode: hold middle button (GPIO18/BTN_MID) at boot.
+    // USB MSC mode: hold Key3 (GPIO18) at boot.
     // Activated BEFORE delay(300) so SD is ready before Windows reads
     // sector 0 during USB enumeration.
     if (usb_msc_try_activate(msc_boot_held)) {
@@ -298,6 +367,8 @@ void setup() {
     audio_stream_init();
     sd_init();
     sd_phrases_init();
+    wifi_manager_init();
+    wifi_backup_init();
 
     // Init IMU (accelerometer for auto-rotation)
     imu_init();
@@ -342,16 +413,18 @@ void setup() {
     ble_init();
 
     // Physical button. Leave GPIO9/GPIO10 alone; they are I2S audio pins.
-    pinMode(BTN_MID, INPUT_PULLUP);   // GPIO18 middle
+    pinMode(KEY3_IO18, INPUT_PULLUP);   // Key3 / IO18
 
     // Build dashboard
     ui_init();
+    recorder_init();
 
     // Show initial BLE status on Bluetooth screen
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
 
     // Show initial battery status
     ui_update_battery(power_battery_pct(), power_is_charging());
+    ui_update_wifi_status(wifi_manager_connected(), wifi_manager_rssi());
 
     ui_show_screen(SCREEN_SPLASH);
 
@@ -397,20 +470,33 @@ void loop() {
     power_tick();
     imu_tick();
     splash_tick();
+    recorder_tick();
+    wifi_manager_tick();
+    wifi_backup_tick();
 
     // Button input:
-    //   MIDDLE (GPIO18) -> cycle screens; hold at boot -> USB Drive Mode
+    //   KEY3 (GPIO18) double-click -> start/stop recorder; hold at boot -> USB Drive Mode
+    //   PWR short-press -> cycle screens; on splash -> cycle animations
     // GPIO9/GPIO10 are I2S BCLK/DIN and are not safe as buttons.
     {
-        static bool mid_was = false;
-        bool mid_now  = (digitalRead(BTN_MID)  == LOW);
-        if (mid_now && !mid_was) {
-            if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
-            else                                          ui_cycle_screen();
+        static bool key3_was = false;
+        static uint32_t key3_last_release = 0;
+        static uint32_t key3_last_toggle = 0;
+        bool key3_now = (digitalRead(KEY3_IO18) == LOW);
+        if (!key3_now && key3_was) {
+            uint32_t now = millis();
+            if (now - key3_last_release <= 450) {
+                if (now - key3_last_toggle > 800) {
+                    recorder_toggle();
+                    key3_last_toggle = now;
+                }
+                key3_last_release = 0;
+            } else {
+                key3_last_release = now;
+            }
         }
-        mid_was = mid_now;
+        key3_was = key3_now;
 
-        // AXP power key still works as fallback for screen cycling
         if (power_pwr_pressed()) {
             if (ui_get_current_screen() == SCREEN_SPLASH) splash_next();
             else                                          ui_cycle_screen();
@@ -429,12 +515,22 @@ void loop() {
     // Update battery indicator
     static int last_pct = -2;
     static bool last_charging = false;
+    static bool last_wifi_connected = false;
+    static int last_wifi_rssi_bucket = 99;
     int pct = power_battery_pct();
     bool charging = power_is_charging();
     if (pct != last_pct || charging != last_charging) {
         last_pct = pct;
         last_charging = charging;
         ui_update_battery(pct, charging);
+    }
+    bool wifi_connected = wifi_manager_connected();
+    int wifi_rssi = wifi_manager_rssi();
+    int wifi_rssi_bucket = wifi_connected ? (wifi_rssi / 5) : 99;
+    if (wifi_connected != last_wifi_connected || wifi_rssi_bucket != last_wifi_rssi_bucket) {
+        last_wifi_connected = wifi_connected;
+        last_wifi_rssi_bucket = wifi_rssi_bucket;
+        ui_update_wifi_status(wifi_connected, wifi_rssi);
     }
 
     // Check for serial commands (screenshot, etc.)

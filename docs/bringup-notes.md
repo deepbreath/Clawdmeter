@@ -76,6 +76,7 @@ Working pins:
 | Signal | GPIO |
 |---|---:|
 | ES8311 MCLK | 42 |
+| ES7210 MCLK | 42 |
 | I2S BCLK | 9 |
 | I2S LRCK/WS | 45 |
 | ES8311 DOUT (ESP32 -> codec) | 8 |
