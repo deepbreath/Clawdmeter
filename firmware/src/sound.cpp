@@ -274,19 +274,6 @@ static void async_sound_task(void *arg) {
 void sound_play_async(sound_event_t evt) {
     if (!s_ready || sound_audio_busy()) return;
 
-    // Fish events are SD-only to keep the firmware image small.
-    if (evt >= EVT_FISH_IDLE && evt <= EVT_FISH_HEAVY) {
-        static const char* const fish_paths[] = {
-            "/fish_idle.wav", "/fish_norm.wav",
-            "/fish_active.wav", "/fish_heavy.wav"
-        };
-        const char* path = fish_paths[evt - EVT_FISH_IDLE];
-        if (!sd_play_wav(path)) {
-            Serial.printf("sound: fish SD wav unavailable: %s\n", path);
-        }
-        return;
-    }
-
     s_playing = true;
     if (!output_start()) {
         s_playing = false;

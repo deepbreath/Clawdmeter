@@ -2,9 +2,6 @@
 #include "splash_animations.h"
 #include "theme.h"
 #include "usage_rate.h"
-#include "sound.h"
-#include "ble.h"
-#include "sd_phrases.h"
 #include <Arduino.h>
 #include <string.h>
 #include <esp_heap_caps.h>
@@ -221,21 +218,6 @@ void splash_pick_for_current_rate(void) {
     last_pick_ms = frame_started_ms;
     const splash_anim_def_t *a = &splash_anims[cur_anim];
     render_frame(a->frames[0], a->palette);
-
-    // Voice priority (highest to lowest):
-    //   1. BLE stream from daemon (fish_voice.py) — s_stream_active guard in sound.cpp
-    //   2. SD phrase library — random, non-repeating, works offline
-    //   3. Compiled-in PCM fallback — last resort when SD not populated
-    if (!sd_phrase_play(g)) {
-        // SD phrases missing or audio busy — fall back to static PCM only when
-        // daemon is not connected (daemon handles live voice when connected).
-        if (ble_get_state() != BLE_STATE_CONNECTED) {
-            static const sound_event_t fish_evts[GROUP_COUNT] = {
-                EVT_FISH_IDLE, EVT_FISH_NORM, EVT_FISH_ACTIVE, EVT_FISH_HEAVY
-            };
-            sound_play_async(fish_evts[g]);
-        }
-    }
 }
 
 bool splash_is_active(void) { return active; }

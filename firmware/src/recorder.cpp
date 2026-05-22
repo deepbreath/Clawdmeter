@@ -1214,6 +1214,12 @@ void recorder_tick(void) {
     ui_update_recorder_status(s_status);
 }
 
+static void abort_recording_start(bool audio_claimed, bool sd_busy) {
+    if (audio_claimed) sound_resume_output();
+    if (sd_busy) sd_set_recording_busy(false);
+    wifi_manager_pause(false);
+}
+
 bool recorder_toggle(void) {
     if (s_recording) {
         if (millis() - s_start_ms < REC_MIN_DURATION_MS) {
@@ -1239,13 +1245,13 @@ bool recorder_toggle(void) {
     wifi_manager_pause(true);
     wait_for_sd_dma_margin(REC_START_DMA_WAIT_MS);
     if (!sd_dma_ready_for_recording()) {
-        wifi_manager_pause(false);
+        abort_recording_start(false, false);
         Serial.printf("recorder: low DMA memory, dma=%u\n", (unsigned)sd_dma_free());
         set_status("No memory");
         return false;
     }
     if (!sound_try_claim_audio()) {
-        wifi_manager_pause(false);
+        abort_recording_start(false, false);
         set_status("Audio busy");
         return false;
     }
@@ -1294,9 +1300,7 @@ bool recorder_toggle(void) {
     BaseType_t task_ok = xTaskCreate(recorder_task, "recorder", 8192, nullptr, 4, &s_task);
     if (task_ok != pdPASS) {
         s_recording = false;
-        sound_set_stream_active(false);
-        sd_set_recording_busy(false);
-        wifi_manager_pause(false);
+        abort_recording_start(true, true);
         set_status("Record failed");
         return false;
     }

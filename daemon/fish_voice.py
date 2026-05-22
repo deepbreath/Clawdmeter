@@ -16,6 +16,7 @@ Model files (default path: siblings repo ../guppylm/docs/):
 import asyncio
 import logging
 import os
+import socket
 import struct
 import tempfile
 import threading
@@ -41,6 +42,11 @@ if not GUPPYLM_MODEL.exists():
 # BLE characteristic UUIDs
 AUDIO_CHAR_UUID = "4c41555a-4465-7669-6365-000000000005"  # Opus/ADPCM audio frames
 TEXT_CHAR_UUID  = "4c41555a-4465-7669-6365-000000000006"  # fish text for display
+
+# Optional WiFi audio target. If set, audio frames are sent over TCP with a
+# two-byte big-endian length prefix followed by the existing BLE frame payload.
+WIFI_AUDIO_HOST = os.environ.get("CLAWDMETER_AUDIO_HOST", "")
+WIFI_AUDIO_PORT = int(os.environ.get("CLAWDMETER_AUDIO_PORT", "8788"))
 
 # Opus parameters — must match audio_stream.cpp on firmware side
 OPUS_SAMPLE_RATE   = 16000
@@ -273,6 +279,38 @@ async def _stream_to_ble(client, frame_type: int, frames: list[bytes]) -> None:
     log.info("audio stream: %d %s frames sent", len(frames), codec)
 
 
+async def _stream_to_wifi(frame_type: int, frames: list[bytes]) -> None:
+    """Stream encoded audio frames to the device over WiFi TCP."""
+    reader, writer = await asyncio.open_connection(WIFI_AUDIO_HOST, WIFI_AUDIO_PORT)
+    del reader
+    try:
+        prefix = bytes([frame_type])
+        for frame in frames:
+            payload = prefix + frame
+            writer.write(struct.pack(">H", len(payload)) + payload)
+            await writer.drain()
+            await asyncio.sleep(0)
+
+        writer.write(struct.pack(">H", 1) + b"\x00")
+        await writer.drain()
+        codec = "Opus" if frame_type == 0x01 else "ADPCM"
+        log.info("wifi audio stream: %d %s frames sent to %s:%d",
+                 len(frames), codec, WIFI_AUDIO_HOST, WIFI_AUDIO_PORT)
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+async def _stream_audio(client, frame_type: int, frames: list[bytes]) -> None:
+    if WIFI_AUDIO_HOST:
+        try:
+            await _stream_to_wifi(frame_type, frames)
+            return
+        except (OSError, socket.gaierror, asyncio.TimeoutError) as e:
+            log.warning("wifi audio failed, falling back to BLE: %s", e)
+    await _stream_to_ble(client, frame_type, frames)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -336,8 +374,10 @@ class FishVoice:
         if not self._available or self._infer is None:
             return
 
-        # Check the audio char is present (Windows GATT cache can be stale)
-        if client.services.get_characteristic(AUDIO_CHAR_UUID) is None:
+        # Check the audio char is present when BLE is the audio transport
+        # (Windows GATT cache can be stale).
+        if (not WIFI_AUDIO_HOST
+                and client.services.get_characteristic(AUDIO_CHAR_UUID) is None):
             log.warning("audio char not found — fish voice skipped")
             return
 
@@ -365,8 +405,8 @@ class FishVoice:
                 await client.write_gatt_char(
                     TEXT_CHAR_UUID, text.encode("utf-8", errors="replace"), response=False)
 
-            # 6. Stream frames to ESP32 via BLE
-            await _stream_to_ble(client, frame_type, frames)
+            # 6. Stream frames to ESP32 via WiFi when configured, otherwise BLE.
+            await _stream_audio(client, frame_type, frames)
 
             self._last_group = group
             self._last_spoke = time.time()

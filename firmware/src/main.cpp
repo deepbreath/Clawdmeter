@@ -11,8 +11,8 @@
 #include "usage_rate.h"
 #include "sound.h"
 #include "audio_stream.h"
+#include "wifi_audio.h"
 #include "sd_card.h"
-#include "sd_phrases.h"
 #include "usb_msc.h"
 #include "recorder.h"
 #include "wifi_manager.h"
@@ -362,11 +362,11 @@ void setup() {
     delay(300);
     Serial.println("{\"ready\":true}");
 
-    // Init audio codec + Opus decoder + SD card + phrase library
+    // Init audio codec + Opus decoder + SD card
     sound_init();
     audio_stream_init();
+    wifi_audio_init();
     sd_init();
-    sd_phrases_init();
     wifi_manager_init();
     wifi_backup_init();
 
@@ -472,6 +472,7 @@ void loop() {
     splash_tick();
     recorder_tick();
     wifi_manager_tick();
+    wifi_audio_tick();
     wifi_backup_tick();
 
     // Button input:
