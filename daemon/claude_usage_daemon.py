@@ -63,6 +63,7 @@ OPENAI_API_BODY = {
     "max_tokens": 1,
     "messages": [{"role": "user", "content": "hi"}],
 }
+CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 CODEX_CONFIG_PATH = Path.home() / ".codex" / "config.json"
 CODEX_AUTH_PATH = Path.home() / ".codex" / "auth.json"
 EVENT_FILE = Path.home() / ".config" / "claude-usage-monitor" / "event.json"
@@ -165,29 +166,32 @@ def read_token() -> str | None:
     return _read_token_file()
 
 
-def read_codex_key() -> str | None:
+def read_codex_credentials() -> tuple[str, str, str | None] | None:
     env_key = os.environ.get("OPENAI_API_KEY")
     if env_key:
-        return env_key
+        return "api_key", env_key, None
     if CODEX_CONFIG_PATH.exists():
         try:
             data = json.loads(CODEX_CONFIG_PATH.read_text())
             key = data.get("apiKey")
             if isinstance(key, str) and key:
-                return key
+                return "api_key", key, None
         except (json.JSONDecodeError, OSError):
             pass
-    # Codex CLI uses OAuth (ChatGPT login) — read access_token from auth.json
     if CODEX_AUTH_PATH.exists():
         try:
             data = json.loads(CODEX_AUTH_PATH.read_text())
-            token = data.get("tokens", {}).get("access_token")
+            key = data.get("OPENAI_API_KEY")
+            if isinstance(key, str) and key:
+                return "api_key", key, None
+            tokens = data.get("tokens", {})
+            token = tokens.get("access_token")
             if isinstance(token, str) and token:
-                return token
+                account_id = tokens.get("account_id")
+                return "chatgpt", token, account_id if isinstance(account_id, str) else None
         except (json.JSONDecodeError, OSError):
             pass
     return None
-
 
 def _parse_reset_seconds(value: str) -> int:
     """Parse OpenAI reset time string like '1m30.5s' or '30s' to integer seconds."""
@@ -197,7 +201,7 @@ def _parse_reset_seconds(value: str) -> int:
     return max(0, int(round(total)))
 
 
-async def poll_codex_api(key: str) -> dict | None:
+async def poll_openai_ratelimit_api(key: str) -> dict | None:
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     try:
         async with httpx.AsyncClient(timeout=20.0) as http:
@@ -218,6 +222,7 @@ async def poll_codex_api(key: str) -> dict | None:
     limit_req = int(hdr("x-ratelimit-limit-requests", "0") or "0")
     remaining_req = int(hdr("x-ratelimit-remaining-requests", "0") or "0")
     reset_tok = hdr("x-ratelimit-reset-tokens", "0s")
+    reset_req = hdr("x-ratelimit-reset-requests", reset_tok)
     if limit_tok == 0 and limit_req == 0:
         log("Codex rate-limit headers absent (no quota info), skipping")
         return {"cx_ok": False}
@@ -225,10 +230,83 @@ async def poll_codex_api(key: str) -> dict | None:
     # Send remaining % (not used %) — display shows how much is left
     token_pct = round(remaining_tok * 100 / max(limit_tok, 1))
     req_pct = round(remaining_req * 100 / max(limit_req, 1))
-    reset_s = _parse_reset_seconds(reset_tok)
+    token_reset_s = _parse_reset_seconds(reset_tok)
+    req_reset_s = _parse_reset_seconds(reset_req)
 
-    return {"cx_ts": token_pct, "cx_tr": reset_s, "cx_rs": req_pct, "cx_ok": True}
+    return {
+        "cx_ts": token_pct,
+        "cx_tr": token_reset_s,
+        "cx_rs": req_pct,
+        "cx_rr": req_reset_s,
+        "cx_ok": True,
+    }
 
+
+
+async def poll_codex_usage_api(token: str, account_id: str | None) -> dict | None:
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0",
+    }
+    if account_id:
+        headers["chatgpt-account-id"] = account_id
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            resp = await http.get(CODEX_USAGE_URL, headers=headers)
+    except httpx.HTTPError as e:
+        log(f"Codex usage call failed: {e}")
+        return None
+
+    if resp.status_code != 200:
+        log(f"Codex usage unexpected status {resp.status_code}, skipping")
+        return {"cx_ok": False}
+
+    try:
+        data = resp.json()
+    except json.JSONDecodeError:
+        log("Codex usage response was not JSON, skipping")
+        return {"cx_ok": False}
+
+    rate_limit = data.get("rate_limit", {})
+    primary = rate_limit.get("primary_window", {})
+    secondary = rate_limit.get("secondary_window", {})
+    if not primary and not secondary:
+        log("Codex usage windows absent, skipping")
+        return {"cx_ok": False}
+
+    def remaining_pct(window: dict) -> int:
+        try:
+            return max(0, min(100, int(round(100 - float(window.get("used_percent", 0))))))
+        except (TypeError, ValueError):
+            return 0
+
+    def reset_seconds(window: dict) -> int:
+        reset = window.get("reset_after_seconds")
+        if reset is not None:
+            try:
+                return max(0, int(round(float(reset))))
+            except (TypeError, ValueError):
+                pass
+        try:
+            return max(0, int(round(float(window.get("reset_at")) - time.time())))
+        except (TypeError, ValueError):
+            return -1
+
+    return {
+        "cx_ts": remaining_pct(primary),
+        "cx_tr": reset_seconds(primary),
+        "cx_rs": remaining_pct(secondary),
+        "cx_rr": reset_seconds(secondary),
+        "cx_ok": True,
+    }
+
+
+async def poll_codex_api(credentials: tuple[str, str, str | None]) -> dict | None:
+    mode, secret, account_id = credentials
+    if mode == "api_key":
+        return await poll_openai_ratelimit_api(secret)
+    return await poll_codex_usage_api(secret, account_id)
 
 def load_cached_address() -> str | None:
     if not SAVED_ADDR_FILE.exists():
@@ -300,9 +378,9 @@ async def poll_api(token: str) -> dict | None:
         "ok": True,
     }
 
-    codex_key = read_codex_key()
-    if codex_key:
-        codex = await poll_codex_api(codex_key)
+    codex_credentials = read_codex_credentials()
+    if codex_credentials:
+        codex = await poll_codex_api(codex_credentials)
         payload.update(codex if codex is not None else {"cx_ok": False})
     else:
         payload["cx_ok"] = False

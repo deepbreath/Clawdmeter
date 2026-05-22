@@ -22,6 +22,7 @@ struct CodexData {
     float token_pct;      // current-minute token utilization (0-100)
     int   token_reset_s;  // seconds until token rate limit resets
     float req_pct;        // current-minute request utilization (0-100)
+    int   req_reset_s;    // seconds until request rate limit resets
     bool  ok;
     bool  valid;          // false until first successful parse
 };

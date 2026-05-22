@@ -185,6 +185,7 @@ static bool parse_json(const char* json, UsageData* out, CodexData* cx_out, soun
         cx_out->token_pct    = (cx_ts >= 0.0f) ? cx_ts : 0.0f;
         cx_out->token_reset_s = doc["cx_tr"] | -1;
         cx_out->req_pct      = doc["cx_rs"] | 0.0f;
+        cx_out->req_reset_s  = doc["cx_rr"] | cx_out->token_reset_s;
         cx_out->ok           = doc["cx_ok"] | false;
         cx_out->valid        = cx_out->ok;
     }

@@ -509,7 +509,7 @@ void ui_update_codex(const CodexData* data) {
     lv_bar_set_value(bar_cx_req, r_pct, LV_ANIM_ON);
     lv_obj_set_style_bg_color(bar_cx_req, pct_color(100.0f - data->req_pct), LV_PART_INDICATOR);
 
-    format_reset_seconds(data->token_reset_s, buf, sizeof(buf));
+    format_reset_seconds(data->req_reset_s, buf, sizeof(buf));
     lv_label_set_text(lbl_cx_req_reset, buf);
 }
 
@@ -597,7 +597,8 @@ void ui_show_screen(screen_t screen) {
 void ui_cycle_screen(void) {
     screen_t next;
     switch (current_screen) {
-    case SCREEN_USAGE:      next = SCREEN_BLUETOOTH; break;
+    case SCREEN_USAGE:      next = SCREEN_CODEX;     break;
+    case SCREEN_CODEX:      next = SCREEN_BLUETOOTH; break;
     default:                next = SCREEN_USAGE;     break;
     }
     ui_show_screen(next);
